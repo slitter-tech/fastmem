@@ -5,6 +5,7 @@ the ctypes implementation. The public API does not depend on which one is
 active.
 """
 
+import array
 import ctypes
 from typing import List, Optional, Sequence
 
@@ -17,10 +18,30 @@ except ImportError:
 
 HAVE_C = _c is not None
 
-# Building (ctypes.c_size_t * n)(*addrs) is not free, but it is much
-# cheaper than the batch itself. The array is needed because C takes a
-# ready uintptr_t buffer rather than a list of Python objects.
+# C takes a ready uintptr_t buffer rather than a list of Python objects:
 _size_t = ctypes.c_size_t
+
+# array.array fills the same uintptr_t buffer about five times faster than
+# ctypes does: 66 us against 330 us for 2000 addresses, which is 12% of a
+# threaded read. The type code has to match the pointer width, since C
+# derives the address count from the buffer length divided by
+# sizeof(uintptr_t) - a mismatch would silently halve or double the count.
+_ARRAY_CODE = "Q" if ctypes.sizeof(ctypes.c_void_p) == 8 else "L"
+
+
+def address_buffer(addresses: Sequence[int]):
+    """Pack ``addresses`` into a contiguous uintptr_t buffer.
+
+    Prefers array.array and falls back to ctypes. The fallback is not
+    just for exotic types: array.array raises OverflowError on a value
+    that does not fit, while ctypes silently truncates it, and callers
+    rely on out-of-range addresses reading as a failure rather than
+    raising (a scanner sweeping uninitialised memory hits them constantly).
+    """
+    try:
+        return array.array(_ARRAY_CODE, addresses)
+    except (OverflowError, TypeError, ValueError):
+        return (_size_t * len(addresses))(*addresses)
 
 # NOTE: argtypes/restype do not apply here - this is a real CPython
 # module, not a ctypes wrapper. _fastmem.c validates types itself through
@@ -90,9 +111,8 @@ def batch_into(
     :param out: buffer of at least ``len(addresses) * size`` bytes.
     :return: mask of length ``len(addresses)``: 1 on success, 0 on failure.
     """
-    count = len(addresses)
     if HAVE_C:
-        arr = (_size_t * count)(*addresses)
+        arr = address_buffer(addresses)
         # count is not passed: C derives it from the address buffer length
         # (abuf.len / sizeof(uintptr_t)), which saves an argument and makes
         # mismatched values impossible.
@@ -134,9 +154,8 @@ def batch_bytes(
     address and eats most of the gain: 2000 us against 750 us on 1000
     addresses when C builds the objects.
     """
-    count = len(addresses)
     if HAVE_C:
-        arr = (_size_t * count)(*addresses)
+        arr = address_buffer(addresses)
         return _c.batch_bytes(handle, arr, size)
 
     from . import _winapi as w
@@ -168,9 +187,63 @@ def batch_grouped_bytes(
     """
     if not HAVE_C:
         raise RuntimeError("grouped batch reads require the C extension")
-    count = len(addresses)
-    arr = (_size_t * count)(*addresses)
+    arr = address_buffer(addresses)
     return _c.batch_grouped_bytes(handle, arr, size, span)
+
+
+def pool_into(
+    handle: int,
+    addresses: Sequence[int],
+    size: int,
+    out,
+    workers: int,
+) -> bytes:
+    """Read ``size`` bytes from each address into ``out``, across threads.
+
+    :param workers: helper threads. The calling thread takes a share too,
+        so 1 already means two-way parallelism.
+    :return: mask of length ``len(addresses)``: 1 on success, 0 on failure.
+
+    Requires the extension. Without it the GIL serialises the reads and
+    threads would only add overhead.
+    """
+    if not HAVE_C:
+        raise RuntimeError("pooled reads require the C extension")
+    arr = address_buffer(addresses)
+    _ok, mask = _c.batch_pooled(handle, arr, size, out, workers)
+    return bytes(mask)
+
+
+def pool_bytes(
+    handle: int,
+    addresses: Sequence[int],
+    size: int,
+    workers: int,
+) -> List[Optional[bytes]]:
+    """Pooled read returning a ready list of ``bytes``/``None``.
+
+    The reads run without the GIL; the objects are built in C afterwards,
+    because creating them requires the GIL anyway.
+    """
+    if not HAVE_C:
+        raise RuntimeError("pooled reads require the C extension")
+    arr = address_buffer(addresses)
+    return _c.batch_pooled_bytes(handle, arr, size, workers)
+
+
+def pool_workers() -> int:
+    """Number of live worker threads. Zero when the pool was never used."""
+    return _c.pool_workers() if HAVE_C else 0
+
+
+def pool_shutdown() -> None:
+    """Stop all worker threads.
+
+    Registered with ``Py_AtExit`` at import, so calling this is only needed
+    to release threads early or to check in tests that the pool drains.
+    """
+    if HAVE_C:
+        _c.pool_shutdown()
 
 
 def single(handle: int, address: int, size: int, out) -> bool:

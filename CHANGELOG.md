@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -36,10 +36,21 @@ First public release.
 
 **C extension** (`src/fastmem/_fastmem.c`, optional)
 - `batch_release` - batched read with the GIL released.
+- `batch_pooled`, `batch_pooled_bytes` - the same read spread across a pool
+  of persistent worker threads. Workers are created on first use and park on
+  an event between calls; building them per call cost ~812 us on Windows,
+  more than the read itself. Measured 2.57x at 4 workers against 1.11x
+  before, and 1.80x instead of 0.20x on addresses too sparse to group.
+- `pool_workers()`, `pool_shutdown()` - inspect and drain the pool. Shutdown
+  is registered with `Py_AtExit`, so no threads outlive the interpreter.
+- `last_error()` - the Windows error code from the last failed read.
+  `ctypes.get_last_error()` cannot see inside the extension, so without this
+  every `ReadMemoryError` from a C-backed read reported code 0 and the
+  "partial copy" hint never appeared.
 - `batch_bytes`, `batch_grouped_bytes` - return ready lists of bytes, with
   no Python-side slicing.
 - `batch_grouped` - grouped read writing into a caller buffer.
-- `one`, `is_alive`.
+- `one`, `one_or`, `is_alive`.
 - `backend.py` selects the implementation and falls back to pure Python
   silently; `Process.backend()` and `backend.HAVE_C` report the active one.
 - `setup.py` builds it when possible. Missing compiler or SDK is not fatal.
@@ -77,14 +88,17 @@ Measured on a foreign process, microseconds per address, 8 bytes each:
 
 | Operation | Python | C |
 |---|---|---|
-| batch into bytearray | 6.04 | 2.14 |
-| batch into list[bytes] | 7.88 | 1.83 |
-| batch into list[int] | 6.86 | 1.99 |
-| grouping vs streaming | 6.51 | 0.30 |
+| batch into bytearray | 5.08 | 1.40 |
+| batch into list[bytes] | 5.82 | 1.36 |
+| batch into list[int] | 5.29 | 1.47 |
+| grouping vs streaming | 5.12 | 0.076 |
 
 The wins come from block size rather than language: one
-`read_region(64 KiB)` costs ~31 us against ~150 ms for the same bytes read
-address by address. Threading is deliberately documented as a modest 1.2-1.4x
-that loses to grouping, since thread creation is paid on every call.
+`read_region(64 KiB)` costs ~22 us against ~150 ms for the same bytes read
+address by address.
+
+Threading is documented as 2.57x at 4 workers, not the 1.11x it measured
+when the threads were built per call. Grouping still wins for dense
+addresses; threads are for addresses too spread out to merge.
 
 [0.1.0]: https://github.com/slitter-tech/fastmem/releases/tag/v0.1.0

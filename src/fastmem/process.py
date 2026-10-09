@@ -1,4 +1,4 @@
-﻿"""Process handle and the consolidated fastmem API.
+"""Process handle and the consolidated fastmem API.
 
 The public surface is deliberately small: one read entry point, one batch
 entry point, one region entry point, plus memory enumeration and search.
@@ -9,7 +9,6 @@ dozen ``read_*`` helpers.
 import ctypes
 import os
 import struct
-import threading
 from ctypes import wintypes
 from typing import Iterable, Iterator, List, Optional, Sequence, Union
 
@@ -556,9 +555,20 @@ class Process:
             grouping. Nearby addresses are the common case in real work -
             object fields, array elements, list nodes - and grouping is up
             to 23x faster than reading them one by one.
-        :param threads: number of threads. ``0`` means one; values above one
-            require the C extension (without it the GIL makes threads
-            slower) and spread the addresses over ``os.cpu_count()`` chunks.
+        :param threads: helper threads for the read. ``0`` means one; above
+            one, the addresses are split across persistent worker threads
+            and the calling thread takes a share too. ``-1`` uses
+            ``os.cpu_count()``. Requires the C extension: without it the
+            GIL serialises the reads and ``threads>1`` raises rather than
+            quietly running slower.
+
+            The workers are created once and reused, so this costs nothing
+            after the first call. Measured on a foreign process with 4
+            helper threads: 2.6x on dense addresses, 1.8x on ones too
+            sparse to group, against 1.11x and 0.20x when the threads were
+            built per call. Grouping still wins for dense input, where one
+            read per window beats one read per address by far more than
+            threads do.
         :return: list of ``bytes``/None, list of numbers/None, or bytearray.
         :raises ProcessClosedError: the handle was already released.
 
@@ -588,11 +598,25 @@ class Process:
         if span < 0:
             span = self._page_size << 2
 
-        if into:
-            return self._read_many_into(handle, addrs, size)
-
+        # threads wins over grouping when both are available: the caller
+        # asked for parallelism explicitly. Note that for dense addresses
+        # grouping is usually the faster of the two (one read per window
+        # instead of one per address), so threads= pays off mainly on
+        # sparse input where nothing can be merged.
         if threads and threads > 1:
+            # Raised even though a single-threaded fallback exists: the GIL
+            # serialises the reads, so honouring threads= would return
+            # slower than threads=1 and hide the reason.
+            if not backend.HAVE_C:
+                raise RuntimeError(
+                    "threads>1 requires the C extension: without it the GIL "
+                    "makes threaded reads slower, not faster"
+                )
+            if into:
+                return self._read_many_into(handle, addrs, size, threads)
             result = self._read_many_threaded(handle, addrs, size, threads)
+        elif into:
+            return self._read_many_into(handle, addrs, size)
         elif span and backend.HAVE_C:
             # Sorting, grouping and object creation all happen in C. Doing
             # the slicing in Python costs 649 us against 86 us per 1000
@@ -623,13 +647,16 @@ class Process:
                 append(None)
         return out
 
-    def _read_many_into(self, handle, addrs, size) -> bytearray:
+    def _read_many_into(self, handle, addrs, size, threads=0) -> bytearray:
         """Batch into one bytearray; no Python-side object per address."""
         count = len(addrs)
         dst = bytearray(count * size)
         view = (ctypes.c_char * len(dst)).from_buffer(dst)
         if backend.HAVE_C:
-            backend.batch_into(handle, addrs, size, view)
+            if threads and threads > 1:
+                backend.pool_into(handle, addrs, size, view, threads)
+            else:
+                backend.batch_into(handle, addrs, size, view)
         else:
             rpm = self._rpm
             offset = 0
@@ -639,7 +666,14 @@ class Process:
         return dst
 
     def _read_many_threaded(self, handle, addrs, size, threads) -> List:
-        """Spread addresses over threads. Requires the C extension."""
+        """Spread addresses over the persistent worker pool.
+
+        Requires the C extension. The workers live in C and are created once
+        on first use; building threading.Thread objects per call instead cost
+        ~812 us on Windows, more than the whole read, which is why threads
+        used to be a net loss (measured 1.11-1.16x, and 0.20x on sparse
+        input where it regressed below single-threaded).
+        """
         if not backend.HAVE_C:
             raise RuntimeError(
                 "threads>1 requires the C extension: without it the GIL "
@@ -647,36 +681,18 @@ class Process:
             )
         count = len(addrs)
         if threads <= 0:
-            threads = os.cpu_count() or 1
-        if threads > count:
-            threads = count
-        if threads <= 1:
+            threads = (os.cpu_count() or 1)
+        # One worker is the floor: 0 would mean "auto", but a single helper
+        # thread plus the caller is already two-way parallelism.
+        if threads < 1:
+            threads = 1
+        if threads > count - 1:
+            # The calling thread always takes a chunk, so more helpers than
+            # count-1 would leave some of them with no work at all.
+            threads = count - 1
+        if threads <= 0:
             return backend.batch_bytes(handle, addrs, size)
-
-        # Each thread gets its own address slice, result list and buffers,
-        # so nothing is shared.
-        chunk = (count + threads - 1) // threads
-        parts = [(i, min(i + chunk, count)) for i in range(0, count, chunk)]
-        results: List[Optional[List]] = [None] * len(parts)
-
-        def worker(idx: int) -> None:
-            lo, hi = parts[idx]
-            results[idx] = backend.batch_bytes(handle, addrs[lo:hi], size)
-
-        workers = [
-            threading.Thread(target=worker, args=(i,), daemon=True)
-            for i in range(len(parts))
-        ]
-        for th in workers:
-            th.start()
-        for th in workers:
-            th.join()
-
-        out: List = []
-        for part in results:
-            if part is not None:
-                out.extend(part)
-        return out
+        return backend.pool_bytes(handle, addrs, size, threads)
 
     # ------------------------------------------------------------------
     # Regions

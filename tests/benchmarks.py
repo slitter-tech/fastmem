@@ -247,8 +247,22 @@ def bench_threads(p, addrs, rounds=15):
         row("C, {} threads, no grouping".format(nt), tn,
             "{:.2f}x".format(t1 / tn))
     print()
-    print("Threads pay for thread creation on every call, so they only")
-    print("win when grouping cannot help (sparse addresses).")
+    print("Same through the into=True path (one bytearray, no per-address")
+    print("Python object):")
+    ti1 = bench(lambda: p.read_many(addrs, 8, into=True, span=0),
+                rounds) / cnt
+    row("C, 1 thread, into bytearray", ti1)
+    for nt in (2, 4):
+        if nt > ncpu:
+            continue
+        tn = bench(lambda n=nt: p.read_many(addrs, 8, into=True, span=0,
+                                           threads=n),
+                   rounds) / cnt
+        row("C, {} threads, into bytearray".format(nt), tn,
+            "{:.2f}x".format(ti1 / tn))
+    print()
+    print("Threads earn their keep on sparse addresses, where grouping")
+    print("cannot merge anything:")
     sparse = [a for a in addrs[::16]]
     ts = bench(lambda: p.read_many(sparse, 8, threads=1, span=0),
                rounds) / len(sparse)
@@ -261,7 +275,12 @@ def bench_threads(p, addrs, rounds=15):
         row("C, sparse, {} threads".format(nt), tn,
             "{:.2f}x".format(ts / tn))
     print()
-    print("For comparison, pure Python across threads makes it WORSE:")
+    print("Worker threads are created once and reused. Rebuilding them per")
+    print("call cost ~812 us, which is why this used to measure 1.11-1.16x,")
+    print("and 0.20x on sparse input.")
+    print("  live workers: {}".format(backend.pool_workers()))
+    print()
+    print("For comparison, pure Python across threads gains far less:")
     py1 = bench(lambda: python_batch_into(p, addrs, 8), rounds) / cnt
     py_n = bench(lambda: py_threads(4), rounds) / cnt
     row("Python, 1 thread", py1)

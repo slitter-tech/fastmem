@@ -1,4 +1,4 @@
-﻿"""Functional tests for fastmem.
+"""Functional tests for fastmem.
 
 Runs both with the C extension and without it (the fallback is verified
 separately in CI).
@@ -540,11 +540,19 @@ def test_threads():
             addrs = [base + i * 8 for i in range(2000)]
 
             if not backend.HAVE_C:
-                try:
-                    p.read_many(addrs, 8, threads=4)
-                    raise AssertionError("expected RuntimeError without C")
-                except RuntimeError:
-                    ok("without C, threads>1 raises RuntimeError")
+                # Both shapes must refuse: into=True took a different route
+                # and used to fall through to the single-threaded path.
+                for kwargs in ({}, {"into": True}):
+                    try:
+                        p.read_many(addrs, 8, threads=4, **kwargs)
+                        raise AssertionError(
+                            "expected RuntimeError without C, kwargs={}"
+                            .format(kwargs))
+                    except RuntimeError:
+                        pass
+                # threads=1 is not a request for parallelism, so it works.
+                assert len(p.read_many(addrs[:16], 8, threads=1)) == 16
+                ok("without C, threads>1 raises RuntimeError on both paths")
                 return
 
             one = p.read_many(addrs, 8)
@@ -554,12 +562,131 @@ def test_threads():
                     "thread count changed the result"
             ok("1/2/4 threads give identical results")
 
+            # Chunk boundaries must tile the range exactly: a gap leaves a
+            # hole in the mask, an overlap double-reads and desynchronises
+            # the completion count so the caller returns mid-write.
+            shapes = {
+                "exact multiple": [base + i * 8 for i in range(2048)],
+                "odd count": [base + i * 8 for i in range(1999)],
+                "1 address": [base],
+                "2 addresses": [base, base + 8],
+                "3 addresses": [base, base + 8, base + 16],
+                "fewer than workers": [base, base + 8, base + 16],
+            }
+            for label, sub in shapes.items():
+                expect = p.read_many(sub, 8, span=0)
+                for nt in (1, 2, 3, 5, 8):
+                    got = p.read_many(sub, 8, threads=nt, span=0)
+                    assert got == expect, \
+                        "{} with {} workers: {!r} != {!r}".format(
+                            label, nt, got, expect)
+                # Mixed readable and unreadable addresses in one batch.
+                mixed = [base + i * 8 if i % 3 else 0x1000
+                         for i in range(len(sub))]
+                expect = p.read_many(mixed, 8, span=0)
+                for nt in (2, 4):
+                    got = p.read_many(mixed, 8, threads=nt, span=0)
+                    assert got == expect, \
+                        "{} mixed with {} workers".format(label, nt)
+            ok("chunk shapes tile the batch exactly (6 shapes x 5 worker "
+               "counts)")
+
+            # A mask with holes must not bleed into the next call, and the
+            # data must actually land in the buffer.
+            holes = [base + i * 8 if i % 2 else 0x1000 for i in range(1000)]
+            into_single = p.read_many(holes, 8, into=True, span=0)
+            for nt in (2, 4, 8):
+                assert p.read_many(holes, 8, into=True, span=0,
+                                   threads=nt) == into_single, \
+                    "into=True changed with {} workers".format(nt)
+            ok("into=True matches single-threaded, including failures")
+
+            # Out-of-range addresses must read as failures, not raise: a
+            # scanner sweeping uninitialised memory hits them constantly.
+            garbage = [base, 2 ** 70, -1, 0xFFFFFFFFFFFFFFFF, base + 8]
+            expect = p.read_many(garbage, 8, span=0)
+            assert expect[0] is not None and expect[4] is not None, expect
+            assert expect[1:4] == [None, None, None], expect
+            for nt in (2, 4):
+                assert p.read_many(garbage, 8, threads=nt, span=0) == expect
+            ok("out-of-range addresses fail instead of raising")
+
+            # The pool must be reused: rebuilding workers per call is what
+            # made threads slower than no threads at all.
+            backend.pool_shutdown()
+            assert backend.pool_workers() == 0
+            for _ in range(5):
+                p.read_many(addrs, 8, threads=4, span=0)
+            assert backend.pool_workers() == 4, \
+                "expected 4 live workers, got {}".format(
+                    backend.pool_workers())
+            p.read_many(addrs, 8, threads=2, span=0)
+            assert backend.pool_workers() == 4, \
+                "a smaller request must not shrink the pool"
+            ok("worker threads are created once and reused")
+
+            # A worker left mid-job when a read returns would show up as a
+            # corrupted later read, so repeat and compare each time against
+            # the single-threaded result.
+            noisy = [base + i * 8 if i % 5 else 0x1000 for i in range(3000)]
+            expect = p.read_many(noisy, 8, span=0)
+            for round_ in range(30):
+                got = p.read_many(noisy, 8, threads=4, span=0)
+                assert got == expect, \
+                    "read {} diverged at index {}".format(
+                        round_, next((i for i, (a, b) in
+                                      enumerate(zip(expect, got)) if a != b),
+                                     None))
+            ok("30 repeated batched reads stay consistent")
+
             assert p.read_many([], 8, threads=4) == []
             assert p.read_many(addrs[:5], 8, threads=10) is not None
             ok("edges: empty input, threads > address count")
+
+            # Shutdown must drain, otherwise the process would exit with
+            # threads parked in a wait.
+            backend.pool_shutdown()
+            assert backend.pool_workers() == 0
+            # Usable again afterwards: the pool rebuilds on demand.
+            assert p.read_many(addrs[:64], 8, threads=4, span=0) is not None
+            ok("pool shuts down and rebuilds on demand")
     finally:
         proc.kill()
         proc.wait()
+    print()
+
+
+def test_sources():
+    """The package's own source files must be clean UTF-8 without a BOM.
+
+    Not about behaviour, but a BOM or a mangled character in a shipped
+    source file breaks imports on some paths and hides review of the code
+    that reads it. Both happened while editing these files through a
+    PowerShell round-trip on a non-UTF8 console code page.
+    """
+    print(SEP)
+    print("SOURCES")
+    print(SEP)
+
+    import fastmem
+
+    root = os.path.dirname(os.path.abspath(fastmem.__file__))
+    checked = 0
+    for name in sorted(os.listdir(root)):
+        if not name.endswith((".py", ".c")):
+            continue
+        path = os.path.join(root, name)
+        raw = open(path, "rb").read()
+        assert not raw.startswith(b"\xef\xbb\xbf"), \
+            "{} starts with a UTF-8 BOM".format(name)
+        text = raw.decode("utf-8")   # raises on invalid bytes
+        # Mojibake: the UTF-8 bytes of a box-drawing char decoded twice,
+        # or the replacement character left behind by a lossy write.
+        assert "\ufffd" not in text, "{} contains a replacement character".format(name)
+        assert "\u00c3" not in text, "{} contains double-encoded text".format(name)
+        checked += 1
+    ok("{} package source files are clean UTF-8, no BOM, no mojibake".format(
+        checked))
     print()
 
 
@@ -573,6 +700,7 @@ TESTS = [
     test_errors,
     test_foreign,
     test_threads,
+    test_sources,
 ]
 
 

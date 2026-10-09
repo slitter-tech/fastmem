@@ -100,13 +100,15 @@ with Process(pid) as p:
 `span` groups addresses closer than `span` bytes and reads each group with
 a single call. `-1` (default) uses four pages, `0` disables grouping.
 Nearby addresses are the common case in real work - object fields, array
-elements, list nodes - and grouping is up to **22x** faster than reading
+elements, list nodes - and grouping is up to **67x** faster than reading
 them one at a time.
 
-`threads` spreads the work over several threads and requires the C
-extension. Measured gain is modest (1.2-1.4x) because thread creation is
-paid on every call; grouping wins whenever it applies. Use `span=0` with
-`threads` when the addresses are too spread out for grouping.
+`threads` spreads the addresses over worker threads and requires the C
+extension. The workers live in C, are created on first use and are reused
+afterwards, so the cost is paid once rather than per call. Measured gain is
+**1.5x at 2 threads and 2.6x at 4** on addresses too spread out for
+grouping; grouping still wins whenever it applies, so pair `threads` with
+`span=0` when the addresses are scattered.
 
 ### Regions
 
@@ -203,61 +205,81 @@ with Process(pid) as p:
 
 A `Process` instance is **not** thread-safe (it holds a reusable buffer).
 Open one `Process` per thread for manual parallel reads. `read_many` is the
-exception: it manages its own threads and is safe to call.
+exception: the worker pool is shared, guarded, and rebuilt on demand, so it
+is safe to call from several Python threads at once.
 
 ## Performance
 
-Python 3.11, 4 cores, foreign process, 8 bytes per address. Baseline before
-any optimisation was 9.3 us per call.
+Python 3.11, 4 cores, foreign process, 8 bytes per address. "Python" means
+the same work through `ctypes` with the extension removed, so the columns
+differ only in where the loop runs.
 
 | Operation | Python | C | Speedup |
 |---|---|---|---|
-| `read()` in try/except, bad address | 12.80 | - | - |
-| `read(or_none=True)`, bad address | 6.13 | - | - |
-| `read()` success | 7.33 | - | - |
-| batch into `bytearray` | 6.04 | 2.14 | 2.82x |
-| batch into `list[bytes]` | 7.88 | 1.83 | 4.32x |
-| batch into `list[int]` | 6.86 | 1.99 | 3.45x |
-| **grouping vs streaming** | 6.51 | **0.30** | **22.0x** |
+| `read()` in try/except, bad address | 10.46 | - | - |
+| `read(or_none=True)`, bad address | 3.55 | - | - |
+| `read()` success | 3.53 | - | - |
+| `read(as_='int')` | 5.25 | - | - |
+| batch into `bytearray` | 5.08 | 1.40 | 3.62x |
+| batch into `list[bytes]` | 5.82 | 1.36 | 4.27x |
+| batch into `list[int]` | 5.29 | 1.47 | 3.59x |
+| **grouping vs streaming** | 5.12 | **0.076** | **67.2x** |
 
 Large blocks, one API call each:
 
 | | us | MB/s |
 |---|---|---|
-| `read_region(4 KiB)` | 9.3 | 442 |
-| `read_region(64 KiB)` | 30.9 | 2120 |
-| `read_region(1 MiB)` | 1080 | 971 |
+| `read_region(4 KiB)` | 9.7 | 421 |
+| `read_region(64 KiB)` | 22.0 | 2977 |
+| `read_region(1 MiB)` | 817 | 1284 |
 
 ### Where the speed comes from
 
 1. **Block size matters more than language.** One `read_region(64 KiB)`
-   costs ~31 us; reading the same 64 KiB address by address costs ~150 ms.
+   costs ~22 us; reading the same 64 KiB address by address costs ~150 ms.
 2. **Search belongs in C.** `bytes.find` beats a Python loop by five orders
    of magnitude.
 3. **Allocation zeroes memory.** `(ctypes.c_char * n)()` memsets: ~400 us
    for 1 MiB. A reusable buffer removes it.
 4. **Exceptions are expensive.** Formatting the error text cost 3.3 us; the
    message is now built lazily in `__str__`.
-5. **C means one boundary crossing instead of a thousand.** A Python → C
+5. **C means one boundary crossing instead of a thousand.** A Python -> C
    call costs ~0.6 us, and a 1000-address batch in Python pays that a
    thousand times. The C loop crosses once.
+6. **Handing data to C has a price too.** `(ctypes.c_size_t * n)(*addrs)`
+   took 330 us for 2000 addresses; `array.array` fills the same buffer in
+   66 us. Worth 12% of a threaded read on its own.
 
 ### Threads
 
-Measured on a foreign process, no grouping:
+Measured on a foreign process, no grouping, microseconds per address:
 
 | | 1 thread | 2 | 4 |
 |---|---|---|---|
-| C, GIL released | 1.97 | 1.44 (1.37x) | 1.66 (1.19x) |
+| C, worker pool | 1.28 | 0.85 (1.51x) | 0.50 (2.57x) |
+| same, into a bytearray | 1.26 | 0.96 (1.32x) | 0.54 (2.32x) |
+| same, sparse addresses | 1.24 | 0.93 (1.33x) | 0.69 (1.80x) |
 
-Modest, because thread creation is paid on every call. Without the
-extension threads are actively harmful. A control group confirms the
-mechanism: a variant that holds the GIL gains exactly nothing from four
-threads (1617 us against 1605 us for one), so the limiter is the GIL, not
-contention inside the kernel.
+Threads used to be a net loss here: building `threading.Thread` objects per
+call cost ~812 us on Windows, more than the ~1700 us of work it was meant
+to parallelise, so four threads measured 1.11x on dense input and 0.20x on
+sparse input - worse than not threading at all. The workers now live in C,
+are created on first use and park on an event between calls, which is what
+turned those into 2.57x and 1.80x. Repeated runs put the four-thread figure
+between 2.57x and 2.71x; absolute timings move with machine load, the
+ratios do not.
 
-Prefer grouping. Reach for threads only when the addresses are too spread
-out for grouping to apply.
+A control group confirms the mechanism: a variant that holds the GIL gains
+exactly nothing from four threads (1617 us against 1605 us for one), so the
+limiter is the GIL, not contention inside the kernel. The pool releases it
+for the whole read.
+
+The calling thread takes a share of the work, so `threads=4` means five
+readers. `threads` is capped at `len(addrs) - 1` for the same reason.
+
+Prefer grouping for dense addresses: one read per window beats one read per
+address by more than threads can recover. Reach for threads when the
+addresses are too spread out for grouping to apply.
 
 ## Building from source
 
