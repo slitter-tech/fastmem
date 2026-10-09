@@ -1,19 +1,18 @@
-# Публикация на PyPI
+# Publishing to PyPI
 
-## Однократная настройка (нужно сделать руками)
+## One-time setup (do this by hand)
 
-Публикация идёт через **Trusted Publishing** (OIDC), поэтому токен
-в секретах репозитория не нужен и хранить его не нужно.
+Publishing uses **Trusted Publishing** (OIDC), so no token has to be kept
+in the repository secrets.
 
-1. Зарегистрировать проект на <https://pypi.org/project/fastmem/>.
-   Если имя уже занято другим — придётся сменить `name` в
-   `pyproject.toml`.
+1. Register the project at <https://pypi.org/project/fastmem/>.
+   If the name is taken, `name` in `pyproject.toml` has to change.
 
-2. Открыть проект → **Manage → Publishing → Add a new publisher**.
+2. Open the project -> **Manage -> Publishing -> Add a new publisher**.
 
-3. Заполнить:
+3. Fill in:
 
-   | Поле | Значение |
+   | Field | Value |
    |---|---|
    | PyPI project name | `fastmem` |
    | Owner | `slitter-tech` |
@@ -21,46 +20,66 @@
    | Workflow name | `publish.yml` |
    | Environment name | `pypi` |
 
-   Имя окружения обязано совпадать с тем, что указано в
-   `.github/workflows/publish.yml` (секция `environment`). При
-   создании окружения на GitHub отметьте **Prevent self-review** —
-   пусть approve делает другой человек.
+   The environment name must match the `environment` block in
+   `.github/workflows/publish.yml`. When creating the environment on GitHub,
+   tick **Prevent self-review** so a second person does the approval.
 
-## Релиз
+## Release
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-Тег сам создаст GitHub Release, соберёт wheel и sdist и опубликует
-их на PyPI. Версия в теге и в `pyproject.toml` сверяется в CI: при
-расхождении публикация не состоится.
+The tag builds the wheels and the sdist, publishes them to PyPI and creates
+the GitHub Release with the matching CHANGELOG section. The tag is checked
+against the version in `pyproject.toml`, so a mismatch stops the publish
+rather than uploading the wrong number.
 
-## Что собирается
+## What gets built
 
-| Артефакт | Содержимое |
+| Artefact | Contents |
 |---|---|
-| `fastmem-0.2.0-cp3X-cp3X-win_amd64.whl` | готовое C-расширение |
-| `fastmem-0.2.0.tar.gz` | исходники, расширение собирается при установке |
+| `fastmem-0.1.0-cp3X-cp3X-win_amd64.whl` | x64, Python 3.9-3.13 |
+| `fastmem-0.1.0-cp3X-cp3X-win32.whl` | x86, Python 3.9-3.13 |
+| `fastmem-0.1.0-cp3X-cp3X-win_arm64.whl` | ARM64, Python 3.9-3.13 |
+| `fastmem-0.1.0.tar.gz` | sources; the extension builds on install |
 
-Wheel собирается под тег или вручную (вкладка **Actions → CI →
-Build wheels → Run workflow**).
+Eighteen wheels: three architectures times six interpreter minors. x86 and
+ARM64 are cross-compiled from the x64 runner, which works because
+`setup.py` reads `FASTMEM_BUILD_ARCH` and picks the matching MSVC and SDK
+library directories.
 
-## Проверка пакета
+The sdist is built in one matrix leg only, otherwise all three would
+upload the same filename.
+
+Wheels can also be built without publishing: **Actions -> CI -> Build
+wheels -> Run workflow**. The native C job is
+**Actions -> CI -> C and C++ build**.
+
+## Verifying the package
 
 ```bash
 pip install fastmem
-python -c "from fastmem import Process, backend; print(backend.backend_name())"
+python -c "from fastmem import backend; print(backend.backend_name())"
 ```
 
-Ожидается `c-extension` для x64 и `python-ctypes` для x86 и ARM64:
-wheel собирается только под x64, остальные платформы получат sdist и
-соберут расширение сами либо останутся на чистом Python.
+`c-extension` is expected everywhere a wheel exists. `python-ctypes` means
+no wheel matched and pip fell back to the sdist: check the architecture and
+Python version, and that a compiler was available for the fallback path.
 
-## Если нужно добавить платформу
+No compiler is needed for a normal install. Wheels cover every supported
+interpreter and architecture; the sdist is only reached when pip has to
+build from source, and the library works on pure Python even then.
 
-Сборка идёт только на Windows. Чтобы добавить x86 или ARM64,
-добавьте в `.github/workflows/ci.yml` в `build-wheels` отдельные
-шаги `cibuildwheel` либо матрицу runner'ов. `pythonXY.lib`
-генерируется автоматически там, где его нет.
+## Notes
+
+- CI runs `test-windows`, `Build wheels`, `C and C++ build` and
+  `Install from sdist` on every push, so a broken wheel configuration
+  surfaces on the branch rather than at release time.
+- A CI step fails the build if any wheel ships without the compiled
+  extension. The extension is optional by design, so that regression is
+  otherwise silent: the wheel installs everywhere and is just slow.
+- Adding a platform means adding a row to the matrices in `ci.yml` and
+  `publish.yml`, plus a `FASTMEM_BUILD_ARCH` value `setup.py` understands.
+  `pythonXY.lib` is generated from the DLL when a Python build ships none.

@@ -8,7 +8,6 @@ Usage:
     python tools/build_native.py [--static] [--example]
 """
 
-import importlib.util
 import os
 import subprocess
 import sys
@@ -18,12 +17,11 @@ ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "build", "native")
 
 
-def load_setup():
-    spec = importlib.util.spec_from_file_location(
-        "fastmem_setup", os.path.join(ROOT, "setup.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def load_paths():
+    """Import msvc_paths from the tools directory next to this file."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import msvc_paths
+    return msvc_paths
 
 
 def tool_paths(msvc, arch="x64"):
@@ -56,13 +54,13 @@ def main():
     static = "--static" in args
     with_example = "--example" in args
 
-    setup = load_setup()
-    _install, msvc = setup._find_msvc()
+    paths = load_paths()
+    _install, msvc = paths.find_msvc()
     if not msvc:
         print("no MSVC toolset found", file=sys.stderr)
         return 1
 
-    arch = setup._target_arch()
+    arch = paths.target_arch()
     bin_dir = tool_paths(msvc, arch)
     cl = os.path.join(bin_dir, "cl.exe")
     if not os.path.isfile(cl):
@@ -70,8 +68,8 @@ def main():
         return 1
 
     os.makedirs(OUT, exist_ok=True)
-    includes = setup._include_dirs() + msvc_include_dirs(msvc)
-    libdirs = setup._library_dirs()
+    includes = paths.include_dirs() + msvc_include_dirs(msvc)
+    libdirs = paths.library_dirs()
 
     # MSVC's own CRT import library. The SDK paths cover kernel32 and the
     # ucrt forwarders but not the vcruntime the CRT links against.
