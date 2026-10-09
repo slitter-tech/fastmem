@@ -19,6 +19,11 @@ include csrc/fastmem.def
 include cpp/include/fastmem/fastmem.hpp
 include cpp/examples/quickstart.cpp
 include tools/build_native.py
+# setup.py imports this, so an sdist without it cannot build the extension
+# at all - and the failure surfaces only at install time on the user's
+# machine.
+include tools/msvc_paths.py
+include tools/release_check.py
 include docs/C_API.md
 
 recursive-include tests *.py
