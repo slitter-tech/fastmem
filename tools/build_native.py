@@ -128,6 +128,9 @@ def build_example(cl, includes, libdirs):
     # one include path rather than two.
     cmd.append("/I{}".format(os.path.join(ROOT, "csrc")))
     cmd.append("/Fe{}".format(exe))
+    # Without an explicit /Fo, cl drops the object file next to the source,
+    # which left a stray quickstart.obj in the repository root.
+    cmd.append("/Fo{}".format(os.path.join(OUT, "quickstart.obj")))
     cmd.append(src)
     cmd.append("/link")
     # /LIBPATH belongs to the linker. Passed to cl it yields
