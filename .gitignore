@@ -1,0 +1,41 @@
+# Сборка
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# C-расширение: собирается при установке, в репозитории не хранится
+src/fastmem/*.pyd
+src/fastmem/*.so
+src/fastmem/*.dll
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Локальное
+*.log
+.env

@@ -1,0 +1,106 @@
+name: Publish to PyPI
+
+# Запускается по тегу v*: и сборка, и публикация. Привязка к
+# release:published требовала бы вручную создавать Release на GitHub,
+# а тег удобнее: git tag + git push и всё.
+on:
+  push:
+    tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Сборка wheel + sdist
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Собрать
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Проверить версию в тега и в пакете
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$TAG version=$VER"
+          test "$TAG" = "v$VER" || { echo "тег $TAG не совпадает с версией $VER"; exit 1; }
+
+      - name: Распечатать содержимое
+        run: |
+          Get-ChildItem dist | Format-Table Name, Length
+          python -c "import zipfile,glob;w=glob.glob('dist/*.whl')[0];print('\n'.join(sorted(zipfile.ZipFile(w).namelist())))"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  publish:
+    name: Публикация на PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/fastmem
+    permissions:
+      id-token: write          # OIDC для Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # skip-existing для повторного запуска того же тега
+          skip-existing: true
+
+  github-release:
+    name: Заметки к релизу
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Пропускаем, если публикация не удалась: не создавать релиз с
+    # недоступными пакетами.
+    if: always() && needs.publish.result == 'success'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Извлечь раздел из CHANGELOG
+        id: notes
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          TAG="${TAG:-$(git describe --tags --abbrev=0)}"
+          python - "$TAG" <<'EOF' > notes.md
+          import re, sys
+          tag = sys.argv[1]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          # берём раздел от "## [tag]" до следующего "## ["
+          m = re.search(r"^## \[%s\][^\n]*\n(.*?)(?=^## \[|\Z)" % re.escape(tag),
+                        text, re.S | re.M)
+          print(m.group(1).strip() if m else "См. CHANGELOG.md")
+          EOF
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: notes.md

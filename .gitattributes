@@ -1,0 +1,22 @@
+# Нормализация окончаний строк: в репозитории LF, в рабочей копии CRLF.
+# Это важно для .github/workflows — CRLF там ломает YAML.
+* text=auto eol=lf
+
+*.py   text eol=lf
+*.c    text eol=lf
+*.h    text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.in   text eol=lf
+LICENSE text eol=lf
+
+# Бинарники
+*.pyd  binary
+*.so   binary
+*.dll  binary
+*.png  binary
+*.ico  binary
+*.whl  binary

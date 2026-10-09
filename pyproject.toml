@@ -1,0 +1,65 @@
+[build-system]
+# setuptools, а не hatchling: нужна сборка C-расширения. Hatchling
+# компиляцию не умеет, и pip install -e . просто не собрал бы _fastmem.
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastmem"
+version = "0.1.0"
+description = "High-performance process memory reading for Windows (reverse engineering, debugging, forensics)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "wh1letr0e" }]
+keywords = [
+    "windows",
+    "memory",
+    "read-process-memory",
+    "reverse-engineering",
+    "debugging",
+    "forensics",
+    "process",
+    "ctypes",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: Microsoft :: Windows :: Windows 7",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Topic :: Security",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/slitter-tech/fastmem"
+Repository = "https://github.com/slitter-tech/fastmem"
+Issues = "https://github.com/slitter-tech/fastmem/issues"
+Changelog = "https://github.com/slitter-tech/fastmem/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+# C-расширение объявляется в setup.py, здесь только раскладка пакета
+package-dir = { "" = "src" }
+zip-safe = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+fastmem = ["*.c", "*.pyd"]
