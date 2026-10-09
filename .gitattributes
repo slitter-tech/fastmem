@@ -1,22 +1,30 @@
-# Нормализация окончаний строк: в репозитории LF, в рабочей копии CRLF.
-# Это важно для .github/workflows — CRLF там ломает YAML.
+# Repository text is LF everywhere, including .github/workflows where YAML
+# forbids CRLF. The previous version of this file was itself CP866, so the
+# comments rendered as mojibake.
+
 * text=auto eol=lf
 
-*.py   text eol=lf
-*.c    text eol=lf
-*.h    text eol=lf
-*.toml text eol=lf
-*.yml  text eol=lf
-*.yaml text eol=lf
-*.md   text eol=lf
-*.txt  text eol=lf
-*.in   text eol=lf
+*.py    text eol=lf
+*.c     text eol=lf
+*.h     text eol=lf
+*.hpp   text eol=lf
+*.cpp   text eol=lf
+*.def   text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.in    text eol=lf
 LICENSE text eol=lf
 
-# Бинарники
-*.pyd  binary
-*.so   binary
-*.dll  binary
-*.png  binary
-*.ico  binary
-*.whl  binary
+# Build output, never committed.
+*.pyd   binary
+*.so    binary
+*.dll   binary
+*.lib   binary
+*.exp   binary
+*.obj   binary
+*.whl   binary
+*.png   binary
+*.ico   binary
