@@ -157,15 +157,35 @@ def batch_grouped_bytes(
 
 
 def single(handle: int, address: int, size: int, out) -> bool:
-    """Single read into a reusable buffer ``out``.
+    """Single read into a caller buffer, returning success.
 
-    The GIL is intentionally not released: ``one_release`` measured
-    slower than ``one`` (5.43 against 4.73 us over 2000 calls) because the
-    GIL switch costs more than the operation.
+    ``out`` is a writable memoryview. The GIL is intentionally not
+    released: a releasing variant measured slower (5.43 against 4.73 us
+    over 2000 calls) because the GIL switch costs more than the operation.
     """
     if HAVE_C:
         return _c.one(handle, address, size, out)
 
     from . import _winapi as w
 
-    return bool(w.ReadProcessMemory(handle, address, out, size, None))
+    buf = out if isinstance(out, int) else ctypes.addressof(
+        out.obj if hasattr(out, "obj") else out
+    )
+    return bool(w.ReadProcessMemory(handle, address, buf, size, None))
+
+
+def single_bytes(handle: int, address: int, size: int, out):
+    """Single read returning ``bytes`` built in C, or None on failure.
+
+    Building the object in C avoids a second copy of the data that a
+    Python-side ``string_at`` would make.
+    """
+    if HAVE_C:
+        return _c.one_or(handle, address, size, out)
+
+    from . import _winapi as w
+
+    addr = out if isinstance(out, int) else ctypes.addressof(out)
+    if w.ReadProcessMemory(handle, address, addr, size, None):
+        return ctypes.string_at(addr, size)
+    return None

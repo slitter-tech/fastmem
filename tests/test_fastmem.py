@@ -1,4 +1,4 @@
-"""Functional tests for fastmem.
+﻿"""Functional tests for fastmem.
 
 Runs both with the C extension and without it (the fallback is verified
 separately in CI).
@@ -33,11 +33,27 @@ SEP = "=" * 74
 
 
 def cbuf(data):
-    """Create a ctypes buffer holding ``data``; return (buffer, address)."""
+    """Create a ctypes buffer holding ``data``; return (buffer, address).
+
+    The caller MUST keep the returned buffer alive for as long as the
+    address is used. Dropping it (``_, addr = cbuf(...)``) lets the GC free
+    the memory, the address becomes stale, and reads from it silently
+    return whatever now occupies that memory.
+    """
     buf = (ctypes.c_char * max(len(data), 1))()
     if data:
         ctypes.memmove(buf, data, len(data))
     return buf, ctypes.addressof(buf)
+
+
+def cbuf_addr(data):
+    """Like cbuf but for cases where the buffer is kept alive by a list.
+
+    Returns (holder, address): put holder in a local or container so the
+    buffer outlives the address.
+    """
+    buf, addr = cbuf(data)
+    return [buf], addr
 
 
 # Victim process code. It prints its OWN pid along with the buffer address.
@@ -114,7 +130,7 @@ def test_compat():
         print("  PROCESS_VM_READ -> ProcessOpenError: {}".format(exc))
 
     big = b"\xAB" * 8
-    _, addr = cbuf(big)
+    _keep_big, addr = cbuf(big)
     with Process(os.getpid()) as p:
         if addr > 0xFFFFFFFF:
             assert p.read(addr, 8) == big, "address above 4 GB read wrong"
@@ -221,7 +237,7 @@ def test_batch():
         ok("read_many accepts a generator")
 
         chunk = bytes(range(251)) + b"\x00" * 5
-        _, caddr = cbuf(chunk)
+        _keep_chunk, caddr = cbuf(chunk)
         assert p.read_many([caddr, caddr], len(chunk)) == [chunk, chunk]
         ok("read_many(size={} > SCRATCH_SIZE)".format(len(chunk)))
 
@@ -245,7 +261,7 @@ def test_batch():
 
         # grouping
         clus = bytes(range(256)) * 16
-        _, base = cbuf(clus)
+        _keep_clus, base = cbuf(clus)
         clustered = [base + i * 16 for i in range(200)]
         expect = [clus[i * 16:i * 16 + 4] for i in range(200)]
 
@@ -277,7 +293,7 @@ def test_regions():
 
     needle = struct.pack("<Q", 0x1122334455667788)
     field = bytes(256) + needle + bytes(256) + needle + bytes(256)
-    _, faddr = cbuf(field)
+    _keep_field, faddr = cbuf(field)
     freg = Region(faddr, len(field), w.MEM_COMMIT, w.PAGE_READWRITE,
                   w.MEM_PRIVATE)
 
@@ -302,7 +318,7 @@ def test_regions():
 
         # exactly divisible: every block must be full size
         clus_data = bytes(range(256)) * 8
-        _, clus_addr = cbuf(clus_data)
+        _keep_clusdata, clus_addr = cbuf(clus_data)
         even = list(p.read_region(clus_addr, len(clus_data), chunks=1024))
         assert b"".join(even) == clus_data
         assert all(len(c) == 1024 for c in even)
@@ -316,14 +332,15 @@ def test_regions():
         # search
         hits = list(p.find(needle, regions=[freg]))
         assert hits == [faddr + 256, faddr + 520], hits
-        assert p.read(hits[0], 8) == needle
+        got = p.read(hits[0], 8)
+        assert got == needle, "read at hit: {!r} != {!r}".format(got, needle)
         ok("find: {} hits at exact addresses".format(len(hits)))
 
         assert list(p.find(needle, regions=[freg], chunk_size=256)) == hits
         ok("chunk_size=256 gives the same result")
 
         straddle = b"\x00" * 200 + needle + b"\x00" * 200
-        _, saddr = cbuf(straddle)
+        _keep_straddle, saddr = cbuf(straddle)
         sreg = Region(saddr, len(straddle), w.MEM_COMMIT,
                       w.PAGE_READWRITE, w.MEM_PRIVATE)
         for cs in (64, 128, 256, 512):
@@ -332,7 +349,7 @@ def test_regions():
         ok("hit straddling a block boundary found at chunk 64/128/256/512")
 
         aln = (b"\x00" * 3 + b"\xAB\xAB\xAB\xAB") * 40
-        _, aaddr = cbuf(aln)
+        _keep_aln, aaddr = cbuf(aln)
         areg = Region(aaddr, len(aln), w.MEM_COMMIT, w.PAGE_READWRITE,
                       w.MEM_PRIVATE)
         exp_all = [aaddr + i * 7 + 3 for i in range(40)]

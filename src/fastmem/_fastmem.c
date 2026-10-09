@@ -710,12 +710,21 @@ do_one(HANDLE h, uintptr_t addr, Py_ssize_t size, unsigned char *dst)
            && got == (SIZE_T)size;
 }
 
+/* Scratch size for one_or: keeps the common small read allocation-free on
+ * the Python side while the result object is still built by CPython. */
+#define ONE_SCRATCH 64
+
 /*
  * one(handle, addr, size, out) -> bool
  *
- * Single read. The GIL is deliberately NOT released: measurements showed
- * one_release slower than one (5.43 against 4.73 us over 2000 calls),
- * because the GIL switch costs more than the operation itself.
+ * Single read into a caller-supplied buffer, returning success. The GIL is
+ * deliberately NOT released: a releasing variant measured slower (5.43
+ * against 4.73 us over 2000 calls), because the GIL switch costs more than
+ * the operation itself.
+ *
+ * ``out`` is taken as a memoryview so Python can hand over its reusable
+ * buffer directly, without building a ctypes array just to match an
+ * argument type.
  */
 static PyObject *
 one(PyObject *self, PyObject *args)
@@ -732,6 +741,53 @@ one(PyObject *self, PyObject *args)
                (unsigned char *)out.buf);
     PyBuffer_Release(&out);
     return PyBool_FromLong(r);
+}
+
+/*
+ * one_or(handle, addr, size, out) -> bytes | None
+ *
+ * Single read returning the bytes object built in C.
+ *
+ * Separate from one because the two hot shapes differ: a number only needs
+ * a bool plus an unpack in Python, while raw bytes are worth building here
+ * to avoid a second copy of the data. ``out`` is a caller buffer kept
+ * writable purely for signature symmetry; the result is copied out of the
+ * scratch buffer.
+ */
+static PyObject *
+one_or(PyObject *self, PyObject *args)
+{
+    unsigned long long handle, addr;
+    Py_ssize_t size;
+    Py_buffer out;
+    unsigned char scratch[ONE_SCRATCH];
+    unsigned char *dst = scratch;
+    unsigned char *owned = NULL;
+    PyObject *result;
+    int r;
+
+    if (!PyArg_ParseTuple(args, "KKny*", &handle, &addr, &size, &out))
+        return NULL;
+
+    if (size > ONE_SCRATCH) {
+        owned = (unsigned char *)PyMem_Malloc((size_t)size);
+        if (!owned) {
+            PyBuffer_Release(&out);
+            return PyErr_NoMemory();
+        }
+        dst = owned;
+    }
+
+    r = do_one((HANDLE)(uintptr_t)handle, (uintptr_t)addr, size, dst);
+    PyBuffer_Release(&out);
+    if (!r) {
+        PyMem_Free(owned);
+        Py_RETURN_NONE;
+    }
+
+    result = PyBytes_FromStringAndSize((const char *)dst, size);
+    PyMem_Free(owned);
+    return result;
 }
 
 /*
@@ -787,7 +843,10 @@ static PyMethodDef methods[] = {
      "Grouped read returning a list of bytes/None, no Python slicing."},
     {"one", one, METH_VARARGS,
      "one(handle, addr, size, out) -> bool\n\n"
-     "Single read, GIL held."},
+     "Single read into a buffer, GIL held."},
+    {"one_or", one_or, METH_VARARGS,
+     "one_or(handle, addr, size, out) -> bytes | None\n\n"
+     "Single read returning bytes built in C."},
     {"is_alive", is_alive, METH_VARARGS,
      "is_alive(handle) -> bool\n\n"
      "Process liveness. Call once per batch, not once per address."},
