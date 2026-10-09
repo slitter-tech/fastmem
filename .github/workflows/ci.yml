@@ -69,9 +69,79 @@ jobs:
             Rename-Item $f.FullName ($f.FullName -replace '\.off$','')
           }
 
-  # Wheels for PyPI. Windows only: the package targets Windows.
+  # Wheels for PyPI, built on GitHub for every supported Python and
+  # architecture. This is the whole point: a user installs a wheel and
+  # never needs MSVC, the Windows SDK or a compiler. x86 and ARM64 are
+  # cross-compiled from the x64 runner, which is why setup.py reads the
+  # target architecture from FASTMEM_BUILD_ARCH rather than assuming the
+  # host.
   build-wheels:
-    name: Build wheels
+    name: Wheels ${{ matrix.arch }}
+    needs: test-windows
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            cibw_archs: AMD64
+          - arch: x86
+            cibw_archs: x86
+          - arch: arm64
+            cibw_archs: ARM64
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheels with cibuildwheel
+        env:
+          FASTMEM_BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          python -m pip install --upgrade pip cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse --archs ${{ matrix.cibw_archs }}
+
+      - name: List wheels
+        run: Get-ChildItem wheelhouse | Select-Object Name, Length | Format-Table -AutoSize
+
+      # Guards against a silent regression to the optional build: a wheel
+      # with no .pyd would install everywhere and simply be slow.
+      - name: Every wheel must contain the extension
+        run: |
+          python -c @"
+          import glob, sys, zipfile
+          wheels = glob.glob('wheelhouse/*.whl')
+          if not wheels:
+              sys.exit('no wheels were produced')
+          bad = []
+          for w in wheels:
+              names = zipfile.ZipFile(w).namelist()
+              if not any(n.endswith('.pyd') for n in names):
+                  bad.append(w)
+          print('\n'.join(sorted(w.split('/')[-1] for w in wheels)))
+          if bad:
+              sys.exit('no C extension in: ' + ', '.join(bad))
+          print('all wheels carry the compiled extension')
+          "@
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+
+  # The standalone C library and the header-only C++ wrapper. They ship
+  # outside the wheel, so nothing else in this workflow would notice if
+  # they stopped compiling.
+  native:
+    name: C and C++ build
     needs: test-windows
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
@@ -85,20 +155,25 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Build wheel
+      # /W4 /WX is set inside the build script, so a new warning fails the
+      # job rather than scrolling past.
+      - name: Build the C library and the C++ example
+        run: python tools/build_native.py --example
+
+      - name: Run the example against this process
         run: |
-          python -m pip install --upgrade pip build
-          python -m build --wheel
-
-      - name: Show wheel contents
-        run: python -c "import zipfile,glob; w=glob.glob('dist/*.whl')[0]; print(w); print('\n'.join(sorted(zipfile.ZipFile(w).namelist())))"
+          $env:PATH = "$PWD\build\native;$env:PATH"
+          .\build\native\quickstart.exe
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels
-          path: dist/*.whl
+          name: native
+          path: |
+            build/native/fastmem.dll
+            build/native/fastmem.lib
+            build/native/quickstart.exe
 
   # sdist -> clean venv -> tests. Guarantees that installing without a
   # compiler works, which is what most pip users on Windows hit.

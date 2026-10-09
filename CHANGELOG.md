@@ -34,6 +34,19 @@ First public release.
   `protect`, `type`, `end`, `committed`, `readable`, `is_image`,
   `is_private`, `contains()`.
 
+**Standalone C and C++**
+- `csrc/fastmem.h`, `csrc/fastmem.c` - the same engine in plain C99, one
+  translation unit, no dependency beyond kernel32. `fastmem_open`,
+  `fastmem_read`, `fastmem_read_many`, `fastmem_read_grouped`,
+  `fastmem_read_region`, `fastmem_find`, `fastmem_regions`, `fastmem_query`
+  and the pool variants.
+- `cpp/include/fastmem/fastmem.hpp` - header-only C++17 wrapper: move-only
+  RAII handle, typed reads, `std::vector` containers, `fastmem::error`.
+- `tools/build_native.py` builds both. Reads the target architecture from
+  `FASTMEM_BUILD_ARCH`, which is what lets one x64 runner cross-compile
+  x86 and ARM64.
+- `docs/C_API.md` documents both and records the PAGE_* trap below.
+
 **C extension** (`src/fastmem/_fastmem.c`, optional)
 - `batch_release` - batched read with the GIL released.
 - `batch_pooled`, `batch_pooled_bytes` - the same read spread across a pool
@@ -56,6 +69,10 @@ First public release.
 - `setup.py` builds it when possible. Missing compiler or SDK is not fatal.
 
 **Other**
+- Wheels for Python 3.9-3.13 on x64, x86 and ARM64 are built on GitHub by
+  cibuildwheel and published to PyPI, so installing normally requires no
+  compiler at all. A CI step fails the build if a wheel ships without the
+  compiled extension, since that regression is silent otherwise.
 - `read_many` accepts any iterable, including generators.
 - Target bitness detection via `IsWow64Process2` → `IsWow64Process` →
   system architecture; exposes `pointer_size`, `is_64bit`, `machine`,
@@ -81,6 +98,12 @@ First public release.
   readable text instead of crashing.
 - A process dying mid-read never raises from `or_none=True`, and plain
   `read` raises `ProcessTerminatedError`.
+- The C library reports region protection as FM_PROTECT_* permission bits
+  rather than the raw PAGE_* value. PAGE_READWRITE (0x04) does not carry
+  PAGE_READONLY's bit (0x02), so filtering on the raw value with a plain AND
+  rejected every writable region - most of a process, including the stack
+  and heap. The example caught it: the readable region count went from 44 to
+  86 once fixed.
 
 ### Performance
 

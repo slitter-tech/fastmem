@@ -12,8 +12,18 @@ on:
 
 jobs:
   build:
-    name: Build wheel + sdist
+    name: Build wheels + sdist
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            cibw_archs: AMD64
+          - arch: x86
+            cibw_archs: x86
+          - arch: arm64
+            cibw_archs: ARM64
     defaults:
       run:
         shell: pwsh
@@ -24,12 +34,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Build
-        run: |
-          python -m pip install --upgrade pip build
-          python -m build
+          python-version: "3.12"
 
       - name: Check tag against package version
         shell: bash
@@ -39,15 +44,28 @@ jobs:
           echo "tag=$TAG version=$VER"
           test "$TAG" = "v$VER" || { echo "tag $TAG does not match version $VER"; exit 1; }
 
-      - name: Show contents
+      # Same matrix as CI, so what is published is exactly what was tested.
+      - name: Build wheels with cibuildwheel
+        env:
+          FASTMEM_BUILD_ARCH: ${{ matrix.arch }}
         run: |
-          Get-ChildItem dist | Format-Table Name, Length
-          python -c "import zipfile,glob;w=glob.glob('dist/*.whl')[0];print('\n'.join(sorted(zipfile.ZipFile(w).namelist())))"
+          python -m pip install --upgrade pip cibuildwheel
+          python -m cibuildwheel --output-dir wheelhouse --archs ${{ matrix.cibw_archs }}
+
+      # The sdist is the fallback for platforms no wheel covers. Built in
+      # only one matrix leg, otherwise it would be uploaded three times
+      # under the same filename.
+      - name: Build sdist
+        if: matrix.arch == 'x64'
+        run: python -m build --sdist --outdir wheelhouse
+
+      - name: List artifacts
+        run: Get-ChildItem wheelhouse | Select-Object Name, Length | Format-Table -AutoSize
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/*
+          name: dist-${{ matrix.arch }}
+          path: wheelhouse/*
 
   publish:
     name: Publish to PyPI
@@ -61,8 +79,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
           path: dist
+          merge-multiple: true
+
+      - name: List what will be uploaded
+        run: ls -l dist
 
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -87,8 +109,9 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
           path: dist
+          merge-multiple: true
 
       - name: Extract section from CHANGELOG
         id: notes

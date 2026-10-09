@@ -11,6 +11,14 @@ High-performance process memory reading for Windows. Pure `ctypes` and the
 standard library. An optional C extension is built automatically when a
 compiler is available, but is never required.
 
+**You do not need a compiler.** Wheels for every supported Python and
+architecture are built on GitHub and uploaded to PyPI, so `pip install
+fastmem` normally installs a ready binary. A compiler is needed only if you
+install from the sdist, and even then the library still works without one.
+
+The same engine also ships as a standalone C library and a header-only C++
+wrapper - see [docs/C_API.md](docs/C_API.md).
+
 Built for reverse engineering, debugging, memory forensics and security
 research.
 

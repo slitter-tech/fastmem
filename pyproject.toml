@@ -72,3 +72,21 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 fastmem = ["*.c", "*.pyd"]
+
+[tool.cibuildwheel]
+# The point of this table is that nobody has to install a compiler. Every
+# supported interpreter gets a prebuilt wheel, and only platforms that
+# cannot be covered here fall back to the sdist.
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux_* *-manylinux*"
+
+# The functional suite spawns helper processes and measures timings, which
+# does not belong in a packaging smoke test. Assert the thing that matters
+# here: the extension is present, not silently absent because the compiler
+# was missing.
+test-command = "python -c \"import fastmem, fastmem.backend as b; assert b.HAVE_C, 'extension missing from wheel'; print(b.backend_name())\""
+
+# No [tool.cibuildwheel.environment] on purpose: the target architecture is
+# passed by the workflow as FASTMEM_BUILD_ARCH. cibuildwheel sets several
+# environment variables of its own and a fixed value here would be inherited
+# by every cross-compile leg and silently build the wrong binary.

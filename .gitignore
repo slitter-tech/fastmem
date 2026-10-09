@@ -1,14 +1,23 @@
-# Сборка
+# Build output
 build/
 dist/
 *.egg-info/
 *.egg
 .eggs/
+wheelhouse/
 
-# C-расширение: собирается при установке, в репозитории не хранится
+# Built extension: generated locally, never committed. Wheels carry it.
 src/fastmem/*.pyd
 src/fastmem/*.so
 src/fastmem/*.dll
+
+# Native build artifacts
+csrc/*.obj
+csrc/*.lib
+csrc/*.exp
+*.obj
+*.exp
+*.ilk
 
 # Python
 __pycache__/
@@ -20,10 +29,11 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Виртуальные окружения
+# Virtual environments
 .venv/
 venv/
 env/
+.venv-test/
 
 # IDE
 .idea/
@@ -36,6 +46,6 @@ Thumbs.db
 desktop.ini
 .DS_Store
 
-# Локальное
+# Logs and local secrets
 *.log
 .env

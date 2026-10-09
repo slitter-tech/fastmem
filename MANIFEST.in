@@ -10,6 +10,17 @@ include setup.py
 # compile when pip builds from source.
 include src/fastmem/_fastmem.c
 
+# The standalone C library and the header-only C++ wrapper, so the sdist is
+# a complete source distribution of the project rather than of the Python
+# half only.
+include csrc/fastmem.h
+include csrc/fastmem.c
+include csrc/fastmem.def
+include cpp/include/fastmem/fastmem.hpp
+include cpp/examples/quickstart.cpp
+include tools/build_native.py
+include docs/C_API.md
+
 recursive-include tests *.py
 
 # The prebuilt extension must not ship in the sdist.

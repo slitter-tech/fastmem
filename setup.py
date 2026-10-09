@@ -141,7 +141,7 @@ def _python_lib_dir(target_dir):
     if not msvc:
         return None
 
-    host = "x64" if sys.maxsize > 2 ** 32 else "x86"
+    host = _target_arch()
     bin_dir = os.path.join(msvc, "bin", "Hostx64", host)
     if not os.path.isdir(bin_dir):
         bin_dir = os.path.join(msvc, "bin", host)
@@ -185,7 +185,7 @@ def _python_lib_dir(target_dir):
             fh.write("LIBRARY {}\nEXPORTS\n".format(os.path.basename(dll)))
             fh.write("\n".join(names))
             fh.write("\n")
-        machine = "X64" if host == "x64" else "X86"
+        machine = {"x64": "X64", "x86": "X86", "arm64": "ARM64"}[host]
         subprocess.check_call(
             [lib_exe, "/nologo", "/def:" + def_path, "/out:" + out_lib,
              "/machine:" + machine],
@@ -198,27 +198,61 @@ def _python_lib_dir(target_dir):
     return target_dir if os.path.isfile(out_lib) else None
 
 
+def _target_arch():
+    """Architecture being compiled for.
+
+    Defaults to the host, but cibuildwheel cross-compiles x86 and ARM64
+    from an x64 runner, so the library paths have to follow the target
+    rather than the machine doing the compiling. Set FASTMEM_BUILD_ARCH to
+    x86 / x64 / arm64.
+    """
+    env = os.environ.get("FASTMEM_BUILD_ARCH", "").strip().lower()
+    if env in ("x86", "x64", "arm64"):
+        return env
+    return "x64" if sys.maxsize > 2 ** 32 else "x86"
+
+
+# Library subdirectory names differ per target inside the MSVC toolset.
+_MSVC_LIB_SUBDIRS = {
+    "x64": ("lib/x64", "lib/amd64_x64"),
+    "x86": ("lib",),
+    "arm64": ("lib/arm64",),
+}
+
+# ... and so do the Windows SDK umbrella library directories.
+_SDK_LIB_SUBDIRS = {
+    "x64": "x64",
+    "x86": "x86",
+    "arm64": "arm64",
+}
+
+
 def _library_dirs():
     """Directories the linker takes kernel32 and the import library from."""
     dirs = []
+    arch = _target_arch()
 
     _install, msvc = _find_msvc()
     if msvc:
-        for sub in ("lib/x64", "lib/x86", "lib/amd64_x64"):
+        for sub in _MSVC_LIB_SUBDIRS.get(arch, _MSVC_LIB_SUBDIRS["x64"]):
             path = os.path.join(msvc, *sub.split("/"))
             if os.path.isdir(path):
                 dirs.append(path)
 
+    sdk_arch = _SDK_LIB_SUBDIRS.get(arch, "x64")
     for root in _sdk_roots():
         for ver in _SDK_LIB_VERSIONS:
+            found = False
+            # Both um (kernel32 and friends) and ucrt (the CRT import
+            # library) are needed: a build that links only um fails with
+            # "cannot open file libucrt.lib".
             for sub in ("um", "ucrt"):
-                path = os.path.join(root, "Lib", ver, sub, "x64")
+                path = os.path.join(root, "Lib", ver, sub, sdk_arch)
                 if os.path.isdir(path):
                     dirs.append(path)
-                    break
-            else:
-                continue
-            break
+                    found = True
+            if found:
+                break
     return dirs
 
 

@@ -1,0 +1,27 @@
+LIBRARY fastmem
+EXPORTS
+    fastmem_open
+    fastmem_open_ex
+    fastmem_close
+    fastmem_pid
+    fastmem_is_alive
+
+    fastmem_read
+    fastmem_read_many
+    fastmem_read_grouped
+    fastmem_read_region
+    fastmem_find
+
+    fastmem_regions
+    fastmem_query
+    fastmem_page_size
+    fastmem_protect_flags
+
+    fastmem_pool_read_many
+    fastmem_pool_workers
+    fastmem_pool_shutdown
+
+    fastmem_last_error
+    fastmem_strerror
+    fastmem_version
+    fastmem_atexit
