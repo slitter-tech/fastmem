@@ -21,15 +21,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2019, windows-2022, windows-2025]
+        # windows-2019 is gone from the hosted runner images: jobs naming it
+        # never start and sit queued forever. Server 2019 support therefore
+        # cannot be verified here and rests on the fact that nothing in the
+        # code uses an API newer than Server 2008.
+        os: [windows-2022, windows-2025]
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
         exclude:
           # Python 3.9 is not published for windows-2025
           - os: windows-2025
             python: "3.9"
-          # Python 3.13 is not published for windows-2019
-          - os: windows-2019
-            python: "3.13"
     defaults:
       run:
         shell: pwsh

@@ -4,6 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/fastmem.svg)](https://pypi.org/project/fastmem/)
 [![Python](https://img.shields.io/pypi/pyversions/fastmem.svg)](https://pypi.org/project/fastmem/)
+[![CI](https://github.com/slitter-tech/fastmem/actions/workflows/ci.yml/badge.svg)](https://github.com/slitter-tech/fastmem/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 High-performance process memory reading for Windows. Pure `ctypes` and the
