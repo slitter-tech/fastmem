@@ -299,11 +299,36 @@ python -m tests.benchmarks --foreign  # benchmarks, foreign process
 ```
 
 Building the extension needs MSVC and the Windows SDK. The SDK is not
-always in the default location, so `setup.py` looks through `WindowsSdkDir`
-and the usual paths including `G:\Windows Kits\10`. Some Python builds ship
-no `pythonXY.lib` (built without `Py_ENABLE_SHARED`); in that case the
-import library is generated from the DLL export table with `dumpbin` and
-`lib.exe`.
+always in the default location, so `tools/msvc_paths.py` looks through
+`WindowsSdkDir` and the usual paths including `G:\Windows Kits\10`. Some
+Python builds ship no `pythonXY.lib` (built without `Py_ENABLE_SHARED`); in
+that case the import library is generated from the DLL export table with
+`dumpbin` and `lib.exe`.
+
+Set `FASTMEM_BUILD_ARCH` to `x86` or `arm64` to cross-compile from an x64
+machine, which is how CI produces all three architectures in one runner.
+
+## C and C++
+
+The engine also ships without Python:
+
+```bat
+python tools\build_native.py --example
+```
+
+- `csrc/fastmem.h`, `csrc/fastmem.c` - plain C99, kernel32 only
+- `cpp/include/fastmem/fastmem.hpp` - header-only C++17 wrapper
+
+```cpp
+#include <fastmem/fastmem.hpp>
+
+fastmem::Process p(1234);
+auto hp   = p.read<uintptr_t>(addr);
+auto blob = p.read_region(base, size);
+for (auto &r : p.readable_regions()) { /* ... */ }
+```
+
+See [docs/C_API.md](docs/C_API.md).
 
 ## License
 

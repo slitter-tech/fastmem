@@ -304,11 +304,38 @@ python -m tests.benchmarks --foreign  # бенчмарки, чужой проц�
 ```
 
 Сборке расширения нужны MSVC и Windows SDK. SDK не всегда лежит в
-дефолтном пути, поэтому `setup.py` ищет его через `WindowsSdkDir` и
-типовые расположения, включая `G:\Windows Kits\10`. На некоторых сборках
-Python нет `pythonXY.lib` (сборка без `Py_ENABLE_SHARED`) — тогда
-импортовая библиотека генерируется из таблицы экспортов DLL через
+дефолтном пути, поэтому `tools/msvc_paths.py` ищет его через
+`WindowsSdkDir` и типовые расположения, включая `G:\Windows Kits\10`. На
+некоторых сборках Python нет `pythonXY.lib` (сборка без
+`Py_ENABLE_SHARED`) — тогда импортовая библиотека генерируется из
+таблицы экспортов DLL через
 `dumpbin` и `lib.exe`.
+
+Переменная `FASTMEM_BUILD_ARCH` со значением `x86` или `arm64` включает
+кросс-компиляцию с x64-машины — так CI собирает все три архитектуры на
+одном раннере.
+
+## C и C++
+
+Тот же движок есть и без Python:
+
+```bat
+python tools\build_native.py --example
+```
+
+- `csrc/fastmem.h`, `csrc/fastmem.c` — чистый C99, только kernel32
+- `cpp/include/fastmem/fastmem.hpp` — header-only обёртка на C++17
+
+```cpp
+#include <fastmem/fastmem.hpp>
+
+fastmem::Process p(1234);
+auto hp   = p.read<uintptr_t>(addr);
+auto blob = p.read_region(base, size);
+for (auto &r : p.readable_regions()) { /* ... */ }
+```
+
+Подробнее в [docs/C_API.md](docs/C_API.md).
 
 ## Лицензия
 
