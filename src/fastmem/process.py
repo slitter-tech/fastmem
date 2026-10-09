@@ -932,7 +932,10 @@ class Process:
 
     def _error(self, address: int, size: int) -> ReadMemoryError:
         """Build the exception. The message is formatted lazily in __str__."""
-        code = _get_last_error()
+        # backend.last_error() reads the extension's own slot when C is
+        # active; ctypes.get_last_error() cannot see into the extension and
+        # would report 0 for every failure.
+        code = backend.last_error()
         if code in (w.ERROR_INVALID_HANDLE,):
             return ProcessTerminatedError(address, size, code)
         return ReadMemoryError(address, size, code)

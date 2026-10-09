@@ -13,19 +13,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Тесты на Windows: без C и с C
+  # Windows test matrix: every job runs the suite twice, with and without
+  # the C extension, so the fallback path is covered on each interpreter.
   test-windows:
-    name: Windows / Python ${{ matrix.python }} / ${{ matrix.arch }}
+    name: Windows / Python ${{ matrix.python }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2019, windows-2022, windows-2025]
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
-        include:
-          - os: windows-2022
-            arch: x64
         exclude:
+          # Python 3.9 is not published for windows-2025
+          - os: windows-2025
+            python: "3.9"
+          # Python 3.13 is not published for windows-2019
           - os: windows-2019
             python: "3.13"
     defaults:
@@ -35,41 +37,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Установить Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-          architecture: ${{ matrix.arch || 'x64' }}
+          architecture: x64
 
-      - name: Установить зависимости
-        run: python -m pip install --upgrade pip
+      # The editable install builds the extension in place. The build is
+      # optional by design, so a missing compiler must not fail the job:
+      # setup.py swallows compiler errors and the package installs on pure
+      # Python, which the fallback step below then exercises.
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
 
-      # Расширение необязательно, но на Windows собирается: MSVC есть
-      # в образе GitHub Actions. При неудаче сборки тесты всё равно идут.
-      - name: Собрать C-расширение
-        continue-on-error: true
-        run: python setup.py build_ext --inplace
-
-      - name: Показать активный backend
+      - name: Report backend
         run: python -c "from fastmem import backend; print('backend:', backend.backend_name())"
 
-      - name: Тесты
+      - name: Tests
         run: python -m tests.test_fastmem
 
-      - name: Тесты без C-расширения (проверка fallback)
-        shell: pwsh
+      - name: Tests without the C extension
         run: |
           $pyd = Get-ChildItem src\fastmem -Filter *.pyd -ErrorAction SilentlyContinue
           foreach ($f in $pyd) { Rename-Item $f.FullName "$($f.FullName).off" }
-          python -c "from fastmem import backend; assert not backend.HAVE_C, backend.backend_name(); print('fallback активен')"
+          python -c "from fastmem import backend; assert not backend.HAVE_C, backend.backend_name(); print('fallback active')"
           python -m tests.test_fastmem
           foreach ($f in Get-ChildItem src\fastmem -Filter *.pyd.off -ErrorAction SilentlyContinue) {
             Rename-Item $f.FullName ($f.FullName -replace '\.off$','')
           }
 
-  # Сборка wheel-ов для PyPI. Только Windows: пакет под Windows.
+  # Wheels for PyPI. Windows only: the package targets Windows.
   build-wheels:
-    name: Сборка wheels
+    name: Build wheels
     needs: test-windows
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
@@ -80,29 +81,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Установить Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Собрать wheel
+      - name: Build wheel
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel
 
-      - name: Проверить содержимое wheel
-        run: |
-          python -c "import zipfile,glob; w=glob.glob('dist/*.whl')[0]; print(w); print('\n'.join(sorted(zipfile.ZipFile(w).namelist())))"
+      - name: Show wheel contents
+        run: python -c "import zipfile,glob; w=glob.glob('dist/*.whl')[0]; print(w); print('\n'.join(sorted(zipfile.ZipFile(w).namelist())))"
 
       - uses: actions/upload-artifact@v4
         with:
           name: wheels
           path: dist/*.whl
 
-  # Проверка пакета без расширения: sdist -> установка -> тесты.
-  # Гарантирует, что pip install без компилятора не ломается.
+  # sdist -> clean venv -> tests. Guarantees that installing without a
+  # compiler works, which is what most pip users on Windows hit.
   test-sdist:
-    name: Установка из sdist
+    name: Install from sdist
     runs-on: windows-2022
     defaults:
       run:
@@ -111,24 +111,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Установить Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Собрать sdist
+      - name: Build sdist
         run: |
           python -m pip install --upgrade pip build
           python -m build --sdist --outdir dist
+          Get-ChildItem dist
 
-      - name: Установить в чистое окружение
+      - name: Install into a clean environment
         run: |
           python -m venv .venv-test
-          .\.venv-test\Scripts\python.exe -m pip install --upgrade pip
-          .\.venv-test\Scripts\python.exe -m pip install dist\*.tar.gz
+          $py = ".\.venv-test\Scripts\python.exe"
+          & $py -m pip install --upgrade pip
+          # The glob has to be resolved by PowerShell. Passed as a literal
+          # argument, pip sees "dist\*.tar.gz" and fails with
+          # OSError: [Errno 22] Invalid argument.
+          $sdist = (Get-ChildItem dist\*.tar.gz).FullName
+          Write-Output "installing $sdist"
+          & $py -m pip install $sdist
 
-      - name: Тесты в чистом окружении
+      - name: Tests in the clean environment
         run: |
-          .\.venv-test\Scripts\python.exe -c "from fastmem import backend; print('backend:', backend.backend_name())"
+          $py = ".\.venv-test\Scripts\python.exe"
+          & $py -c "from fastmem import backend; print('backend:', backend.backend_name())"
           Copy-Item tests -Destination .\.venv-test\lib\site-packages\ -Recurse -Force
-          .\.venv-test\Scripts\python.exe -m tests.test_fastmem
+          & $py -m tests.test_fastmem

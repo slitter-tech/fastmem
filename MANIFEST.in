@@ -1,4 +1,4 @@
-# Метаданные
+# Metadata
 include README.md
 include README_RU.md
 include LICENSE
@@ -6,12 +6,13 @@ include CHANGELOG.md
 include pyproject.toml
 include setup.py
 
-# C-исходник нужен в sdist, иначе расширение нечем собирать
+# The C source must ship in the sdist: without it there is nothing to
+# compile when pip builds from source.
 include src/fastmem/_fastmem.c
 
 recursive-include tests *.py
 
-# Собранное расширение в sdist не нужно
+# The prebuilt extension must not ship in the sdist.
 exclude src/fastmem/*.pyd
 exclude src/fastmem/*.so
 prune build

@@ -37,6 +37,23 @@ def extension_version() -> Optional[str]:
     return getattr(_c, "__version__", None) if HAVE_C else None
 
 
+def last_error() -> int:
+    """Windows error code from the last failed read, 0 if none.
+
+    Needed because ``ctypes.get_last_error()`` cannot observe failures that
+    happened inside the extension. It reads ctypes' own per-thread slot,
+    which is written only by calls declared ``use_last_error=True``, while
+    the extension calls ``ReadProcessMemory`` directly. Without this, every
+    ``ReadMemoryError`` from a C-backed read would report Windows code 0 and
+    the "partial copy" hint would never appear.
+
+    Only meaningful immediately after a failed read.
+    """
+    if HAVE_C:
+        return _c.last_error()
+    return ctypes.get_last_error()
+
+
 def is_alive(handle: Optional[int]) -> bool:
     """Whether the process is still running (via ``GetExitCodeProcess``).
 

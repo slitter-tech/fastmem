@@ -31,6 +31,24 @@
 #define METHKW(name) ((PyCFunction)(void (*)(void))(name))
 
 /* ------------------------------------------------------------------ */
+/* Error reporting                                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * GetLastError() of the most recent failing read.
+ *
+ * Exposed through last_error() because ctypes.get_last_error() cannot see
+ * what happened inside this extension: it reads ctypes' own per-thread slot,
+ * which is written only by calls declared with use_last_error=True, and
+ * ReadProcessMemory here is called directly. Without this, every error
+ * raised from a C-backed read reports Windows code 0.
+ *
+ * A plain static, not per-thread: it is only read after a failure, and the
+ * value it holds is a reason code, not state.
+ */
+static DWORD last_read_error = 0;
+
+/* ------------------------------------------------------------------ */
 /* Argument parsing                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -129,6 +147,7 @@ batch_run(const batch_ctx *ctx)
 {
     Py_ssize_t i, ok = 0;
     SIZE_T got = 0;
+    DWORD err = 0;
 
     for (i = 0; i < ctx->count; ++i) {
         unsigned char *dst = ctx->out + i * ctx->size;
@@ -139,8 +158,16 @@ batch_run(const batch_ctx *ctx)
             ++ok;
         } else {
             ctx->mask[i] = 0;
+            /* Keep the last failure reason. ReadMemoryError needs it, and
+             * ctypes.get_last_error() cannot supply it: that function reads
+             * ctypes' own per-thread slot, which only calls declared with
+             * use_last_error=True update, and nothing here goes through
+             * ctypes. */
+            if (!err)
+                err = GetLastError();
         }
     }
+    last_read_error = err ? err : ERROR_SUCCESS;
     return ok;
 }
 
@@ -267,6 +294,7 @@ batch_bytes(PyObject *self, PyObject *args, PyObject *kwds)
     Py_BEGIN_ALLOW_THREADS
     {
         SIZE_T got = 0;
+        DWORD err = 0;
         for (i = 0; i < count; ++i) {
             unsigned char *dst = raw + i * size;
             if (ReadProcessMemory((HANDLE)(uintptr_t)handle,
@@ -276,8 +304,14 @@ batch_bytes(PyObject *self, PyObject *args, PyObject *kwds)
             }
             else {
                 mask[i] = 0;
+                if (!err)
+                    err = GetLastError();
             }
         }
+        /* Set inside the block: GetLastError() is per-thread, and the GIL
+         * is released around it, so assigning last_read_error here is what
+         * keeps the value on the thread that ran the read. */
+        last_read_error = err ? err : ERROR_SUCCESS;
     }
     Py_END_ALLOW_THREADS
 
@@ -501,6 +535,7 @@ batch_grouped(PyObject *self, PyObject *args, PyObject *kwds)
         const uintptr_t *addrs = (const uintptr_t *)abuf.buf;
         SIZE_T got = 0;
         Py_ssize_t j;
+        DWORD err = 0;
 
         for (i = 0; i < count; ++i)
             order[i] = (uintptr_t)i;
@@ -538,9 +573,14 @@ batch_grouped(PyObject *self, PyObject *args, PyObject *kwds)
                     ++ok;
                 }
             }
-            /* on failure the mask stays zero for the whole window */
+            /* On failure the mask stays zero for the whole window. Keep the
+             * first reason so a later ReadMemoryError can name it. */
+            else if (!err) {
+                err = GetLastError();
+            }
             i = j + 1;
         }
+        last_read_error = err ? err : ERROR_SUCCESS;
     }
     Py_END_ALLOW_THREADS
 
@@ -624,6 +664,7 @@ batch_grouped_bytes(PyObject *self, PyObject *args, PyObject *kwds)
         HANDLE h = (HANDLE)(uintptr_t)handle;
         SIZE_T got = 0;
         Py_ssize_t j;
+        DWORD err = 0;
 
         memset(raw, 0, (size_t)(count * size));
         memset(mask, 0, (size_t)count);
@@ -660,8 +701,12 @@ batch_grouped_bytes(PyObject *self, PyObject *args, PyObject *kwds)
                     mask[idx] = 1;
                 }
             }
+            else if (!err) {
+                err = GetLastError();
+            }
             i = j + 1;
         }
+        last_read_error = err ? err : ERROR_SUCCESS;
     }
     Py_END_ALLOW_THREADS
 
@@ -706,8 +751,24 @@ static int
 do_one(HANDLE h, uintptr_t addr, Py_ssize_t size, unsigned char *dst)
 {
     SIZE_T got = 0;
-    return ReadProcessMemory(h, (LPCVOID)addr, dst, (SIZE_T)size, &got)
-           && got == (SIZE_T)size;
+    if (ReadProcessMemory(h, (LPCVOID)addr, dst, (SIZE_T)size, &got)
+        && got == (SIZE_T)size)
+        return 1;
+    last_read_error = GetLastError();
+    return 0;
+}
+
+/*
+ * last_error() -> int
+ *
+ * Windows error code from the last failed read, 0 if nothing failed or the
+ * failure produced no code. Only meaningful right after a False/None result
+ * from one(), one_or() or a mask with zero bits.
+ */
+static PyObject *
+last_error(PyObject *self, PyObject *unused)
+{
+    return PyLong_FromUnsignedLong((unsigned long)last_read_error);
 }
 
 /* Scratch size for one_or: keeps the common small read allocation-free on
@@ -825,6 +886,9 @@ is_alive(PyObject *self, PyObject *args)
 }
 
 static PyMethodDef methods[] = {
+    {"last_error", METHKW(last_error), METH_NOARGS,
+     "last_error() -> int\n\n"
+     "Windows error code from the last failed read, 0 if none."},
     {"batch_release", METHKW(batch_release), METH_VARARGS | METH_KEYWORDS,
      "batch_release(handle, addrs, size, out) -> (ok, mask)\n\n"
      "Batched read with the GIL released. Main entry point."},

@@ -1,6 +1,7 @@
 [build-system]
-# setuptools, а не hatchling: нужна сборка C-расширения. Hatchling
-# компиляцию не умеет, и pip install -e . просто не собрал бы _fastmem.
+# setuptools rather than hatchling: the C extension has to be compiled and
+# hatchling cannot do that, so pip install -e . would silently skip
+# _fastmem. setuptools is pinned to >=64 for the license handling below.
 requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
@@ -10,8 +11,16 @@ version = "0.1.0"
 description = "High-performance process memory reading for Windows (reverse engineering, debugging, forensics)"
 readme = "README.md"
 requires-python = ">=3.9"
+# The licence is declared exactly once, as a plain PEP 621 string.
+#   * license-files would be read by setuptools >= 77 as the PEP 639
+#     spelling of this same key, which then trips "must be valid exactly
+#     by one definition, 2 matches found" on the runner.
+#   * a "License :: OSI Approved :: MIT License" classifier is rejected by
+#     setuptools >= 77 as superseded ("License classifiers have been
+#     superseded by license expressions").
+# The plain string is the form both the old and the new setuptools accept.
+# LICENSE itself still ships in the sdist through MANIFEST.in.
 license = "MIT"
-license-files = ["LICENSE"]
 authors = [{ name = "wh1letr0e" }]
 keywords = [
     "windows",
@@ -54,7 +63,7 @@ Issues = "https://github.com/slitter-tech/fastmem/issues"
 Changelog = "https://github.com/slitter-tech/fastmem/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
-# C-расширение объявляется в setup.py, здесь только раскладка пакета
+# The C extension is declared in setup.py; here only the package layout.
 package-dir = { "" = "src" }
 zip-safe = false
 

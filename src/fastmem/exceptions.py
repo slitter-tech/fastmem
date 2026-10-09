@@ -26,8 +26,8 @@ class ProcessOpenError(FastMemError):
     def __str__(self) -> str:
         from ._winapi import OPEN_ERROR_HINTS
 
-        hint = OPEN_ERROR_HINTS.get(self.code, "неизвестная ошибка")
-        return "Не удалось открыть процесс {}: {} (код Windows {})".format(
+        hint = OPEN_ERROR_HINTS.get(self.code, "unknown error")
+        return "could not open process {}: {} (Windows code {})".format(
             self.pid, hint, self.code
         )
 
@@ -51,14 +51,14 @@ class ReadMemoryError(FastMemError):
     def __str__(self) -> str:
         from ._winapi import ERROR_HINTS
 
-        hint = ERROR_HINTS.get(self.code, "неизвестная ошибка")
+        hint = ERROR_HINTS.get(self.code, "unknown error")
         if not self.address:
-            return "Чтение памяти не удалось: {} (код Windows {})".format(
+            return "memory read failed: {} (Windows code {})".format(
                 hint, self.code
             )
         return (
-            "Чтение памяти не удалось: 0x{:X} ({} байт): {} "
-            "(код Windows {})".format(self.address, self.size, hint, self.code)
+            "memory read failed: 0x{:X} ({} bytes): {} "
+            "(Windows code {})".format(self.address, self.size, hint, self.code)
         )
 
 
@@ -79,4 +79,4 @@ class ProcessClosedError(ReadMemoryError):
     __slots__ = ()
 
     def __str__(self) -> str:
-        return "Процесс уже закрыт (handle освобождён)"
+        return "process already closed (handle released)"
