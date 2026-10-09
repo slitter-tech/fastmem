@@ -79,6 +79,12 @@ jobs:
     # packages cannot be downloaded.
     if: always() && needs.publish.result == 'success'
     steps:
+      # Needed so CHANGELOG.md is present in the workspace and git describe
+      # has the full history to find the latest tag.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           name: dist
@@ -90,6 +96,8 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           TAG="${TAG:-$(git describe --tags --abbrev=0)}"
+          # CHANGELOG uses "## [0.1.0]" without the leading "v".
+          TAG="${TAG#v}"
           python - "$TAG" <<'EOF' > notes.md
           import re, sys
           tag = sys.argv[1]
