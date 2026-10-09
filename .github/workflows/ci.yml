@@ -78,7 +78,7 @@ jobs:
   build-wheels:
     name: Wheels ${{ matrix.arch }}
     needs: test-windows
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -143,7 +143,7 @@ jobs:
   native:
     name: C and C++ build
     needs: test-windows
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+
     runs-on: windows-2022
     defaults:
       run:
