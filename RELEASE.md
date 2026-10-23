@@ -27,8 +27,8 @@ in the repository secrets.
 ## Release
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The tag builds the wheels and the sdist, publishes them to PyPI and creates
@@ -40,10 +40,10 @@ rather than uploading the wrong number.
 
 | Artefact | Contents |
 |---|---|
-| `fastmem-0.1.0-cp3X-cp3X-win_amd64.whl` | x64, Python 3.9-3.13 |
-| `fastmem-0.1.0-cp3X-cp3X-win32.whl` | x86, Python 3.9-3.13 |
-| `fastmem-0.1.0-cp3X-cp3X-win_arm64.whl` | ARM64, Python 3.9-3.13 |
-| `fastmem-0.1.0.tar.gz` | sources; the extension builds on install |
+| `fastmem-0.1.1-cp3X-cp3X-win_amd64.whl` | x64, Python 3.9-3.13 |
+| `fastmem-0.1.1-cp3X-cp3X-win32.whl` | x86, Python 3.9-3.13 |
+| `fastmem-0.1.1-cp3X-cp3X-win_arm64.whl` | ARM64, Python 3.9-3.13 |
+| `fastmem-0.1.1.tar.gz` | sources; the extension builds on install |
 
 Eighteen wheels: three architectures times six interpreter minors. x86 and
 ARM64 are cross-compiled from the x64 runner, which works because
