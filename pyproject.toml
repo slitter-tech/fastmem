@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastmem"
-version = "0.1.0"
+version = "0.1.1"
 description = "High-performance process memory reading for Windows (reverse engineering, debugging, forensics)"
 readme = "README.md"
 requires-python = ">=3.9"

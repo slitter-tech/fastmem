@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.1] - 2026-10-23
 
 Correctness release. No API changes except the two documented below; every
 item here was reachable from the public surface.
@@ -173,4 +173,5 @@ Threading is documented as 2.57x at 4 workers, not the 1.11x it measured
 when the threads were built per call. Grouping still wins for dense
 addresses; threads are for addresses too spread out to merge.
 
+[0.1.1]: https://github.com/slitter-tech/fastmem/releases/tag/v0.1.1
 [0.1.0]: https://github.com/slitter-tech/fastmem/releases/tag/v0.1.0

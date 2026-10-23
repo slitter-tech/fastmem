@@ -26,7 +26,7 @@ try:
 
     __version__ = version("fastmem")
 except (ImportError, PackageNotFoundError):       # pragma: no cover
-    __version__ = "0.1.0"
+    __version__ = "0.1.1"
 
 __all__ = [
     "Process",
