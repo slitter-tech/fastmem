@@ -39,6 +39,10 @@ item here was reachable from the public surface.
   wrote past its end. `backend.single` is public, so this was reachable.
 - Buffer objects were not released on several error paths in the extension,
   leaving buffers permanently exported.
+- ARM64 wheels for Python 3.13 were built without the extension: the x64
+  `python313.lib` of the build interpreter was put ahead of the ARM64 import
+  library on the link line, so every CPython symbol was unresolved. Cross
+  builds no longer add the host's import library.
 
 ### Changed
 

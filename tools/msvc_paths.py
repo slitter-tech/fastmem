@@ -75,6 +75,11 @@ def sdk_roots():
     return out
 
 
+def _host_arch():
+    """Architecture of the interpreter running this build."""
+    return ARCH_X64 if sys.maxsize > 2 ** 32 else ARCH_X86
+
+
 def target_arch():
     """
     Architecture being compiled for.
@@ -87,7 +92,12 @@ def target_arch():
     env = os.environ.get("FASTMEM_BUILD_ARCH", "").strip().lower()
     if env in (ARCH_X86, ARCH_X64, ARCH_ARM64):
         return env
-    return ARCH_X64 if sys.maxsize > 2 ** 32 else ARCH_X86
+    return _host_arch()
+
+
+def cross_compiling():
+    """Whether the build targets a different architecture than the host."""
+    return target_arch() != _host_arch()
 
 
 def find_msvc():
@@ -165,14 +175,23 @@ def python_lib_dir(target_dir):
     """
     Directory holding pythonXY.lib, generating it from the DLL if absent.
 
-    Two situations need handling. Some Python builds ship no python311.lib
-    (built without Py_ENABLE_SHARED) and the build then fails with LNK1104;
-    the import library is generated from the DLL in that case. And for a
-    cross-compile the DLL that matters belongs to the target architecture,
-    which is not the interpreter running this script.
+    Some Python builds ship no python311.lib (built without
+    Py_ENABLE_SHARED) and the build then fails with LNK1104; the import
+    library is generated from the DLL in that case.
+
+    A cross-compile returns None. The interpreter running the build is the
+    host one, so any pythonXY.lib it can find is the wrong machine:
+    cibuildwheel cross-compiling for ARM64 from an x64 runner puts the x64
+    library ahead of the ARM64 one on the link line, and cp313 then failed
+    with 27 unresolved CPython symbols. cibuildwheel supplies the target
+    import library through DIST_EXTRA_CONFIG, which setuptools appends to
+    its own directories.
 
     :return: directory containing the library, or None.
     """
+    if cross_compiling():
+        return None
+
     tag = "python%d%d" % sys.version_info[:2]
     lib_name = tag + ".lib"
     dll_name = tag + ".dll"

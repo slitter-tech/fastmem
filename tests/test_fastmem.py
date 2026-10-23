@@ -938,6 +938,46 @@ def test_critical_regressions():
     else:
         ok("tools/release_check.py not available, check skipped")
 
+    # Cross-compiling for ARM64 picked up the host's x64 pythonXY.lib and
+    # put it ahead of the ARM64 import library cibuildwheel supplies, so
+    # the cp313 link ended with 27 unresolved CPython symbols.
+    paths_file = os.path.join(root, "tools", "msvc_paths.py")
+    if os.path.isfile(paths_file):
+        spec = importlib.util.spec_from_file_location(
+            "fastmem_msvc_paths", paths_file)
+        paths = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(paths)
+
+        import tempfile
+
+        host = paths.ARCH_X64 if sys.maxsize > 2 ** 32 else paths.ARCH_X86
+        target = (paths.ARCH_ARM64 if host == paths.ARCH_X64
+                  else paths.ARCH_X64)
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = "python{}{}.lib".format(*sys.version_info[:2])
+            with open(os.path.join(tmp, lib), "wb"):
+                pass
+            real_dirs = paths._search_dirs
+            real_arch = os.environ.get("FASTMEM_BUILD_ARCH")
+            paths._search_dirs = lambda: [tmp]
+            try:
+                os.environ["FASTMEM_BUILD_ARCH"] = target
+                assert paths.python_lib_dir(
+                    os.path.join(tmp, "gen")) is None, \
+                    "a cross build took the host's import library"
+                os.environ["FASTMEM_BUILD_ARCH"] = host
+                assert paths.python_lib_dir(tmp) == tmp, \
+                    "a native build lost its import library"
+            finally:
+                paths._search_dirs = real_dirs
+                if real_arch is None:
+                    os.environ.pop("FASTMEM_BUILD_ARCH", None)
+                else:
+                    os.environ["FASTMEM_BUILD_ARCH"] = real_arch
+        ok("cross builds do not take the host's import library")
+    else:
+        ok("tools/msvc_paths.py not available, check skipped")
+
     if not backend.HAVE_C:
         ok("extension regressions skipped (pure Python)")
         print()
