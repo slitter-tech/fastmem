@@ -11,6 +11,7 @@ Usage:
 import ctypes
 import os
 import random
+import re
 import struct
 import subprocess
 import sys
@@ -611,10 +612,47 @@ def test_threads():
                             .format(kwargs))
                     except RuntimeError:
                         pass
+                # -1 means "all CPUs"; it used to skip the threading branch
+                # entirely and quietly run single-threaded.
+                if (os.cpu_count() or 1) > 1:
+                    try:
+                        p.read_many(addrs, 8, threads=-1)
+                        raise AssertionError(
+                            "expected RuntimeError for threads=-1")
+                    except RuntimeError:
+                        pass
                 # threads=1 is not a request for parallelism, so it works.
                 assert len(p.read_many(addrs[:16], 8, threads=1)) == 16
-                ok("without C, threads>1 raises RuntimeError on both paths")
+                ok("without C, threads>1 and threads=-1 raise RuntimeError")
                 return
+
+            # First pool use in this process: the one-time init used to be an
+            # unlocked "if (!ready)" check, so threads arriving together
+            # could initialise the lock twice and build duplicate workers.
+            assert backend.pool_workers() == 0
+            race_errors = []
+            barrier = threading.Barrier(4)
+
+            def race_pool():
+                try:
+                    barrier.wait(10)
+                    for _ in range(10):
+                        got = p.read_many(addrs[:128], 8, threads=2, span=0)
+                        if len(got) != 128 or any(g is None for g in got):
+                            race_errors.append("bad data")
+                except Exception as exc:            # noqa: BLE001
+                    race_errors.append(repr(exc))
+
+            racers = [threading.Thread(target=race_pool) for _ in range(4)]
+            for t in racers:
+                t.start()
+            for t in racers:
+                t.join(30)
+            assert not any(t.is_alive() for t in racers), \
+                "pool initialisation deadlocked"
+            assert not race_errors, race_errors
+            assert 1 <= backend.pool_workers() <= 32
+            ok("first-use pool initialisation survives concurrent callers")
 
             one = p.read_many(addrs, 8)
             assert all(b is not None for b in one)
@@ -622,6 +660,36 @@ def test_threads():
                 assert p.read_many(addrs, 8, threads=nt) == one, \
                     "thread count changed the result"
             ok("1/2/4 threads give identical results")
+
+            # threads=-1 is documented as os.cpu_count(). A negative value
+            # used to fall through the `threads > 1` check and take the
+            # single-threaded path, making auto mode a no-op.
+            cpus = os.cpu_count() or 1
+            if cpus > 1:
+                assert p.read_many(addrs, 8, threads=-1, span=0) == one
+                assert (p.read_many(addrs, 8, into=True, threads=-1,
+                                    span=0)
+                        == p.read_many(addrs, 8, into=True, span=0))
+                assert backend.pool_workers() >= 2, \
+                    "threads=-1 did not use the pool on {} CPUs".format(cpus)
+                ok("threads=-1 resolves to cpu_count ({}) on both shapes"
+                   .format(cpus))
+            else:
+                ok("threads=-1 auto mode skipped (1 CPU)")
+
+            # batch_pooled returned only the calling thread's share: a
+            # 4-worker read of 200 addresses reported 50 successes while
+            # the mask held 200 ones.
+            arr = backend.address_buffer(addrs[:200])
+            out = bytearray(200 * 8)
+            count, mask = backend._c.batch_pooled(p.handle, arr, 8, out, 4)
+            assert count == sum(mask) == 200, (count, sum(mask))
+            mixed = [base + i * 8 if i % 2 else 0x1000 for i in range(200)]
+            arr = backend.address_buffer(mixed)
+            out = bytearray(200 * 8)
+            count, mask = backend._c.batch_pooled(p.handle, arr, 8, out, 4)
+            assert count == sum(mask) == 100, (count, sum(mask))
+            ok("pooled reads count every worker's successes")
 
             # Chunk boundaries must tile the range exactly: a gap leaves a
             # hole in the mask, an overlap double-reads and desynchronises
@@ -818,6 +886,154 @@ def test_integrity():
     print()
 
 
+def test_critical_regressions():
+    """Regressions for the audit findings that could crash or corrupt data."""
+    print(SEP)
+    print("CRITICAL REGRESSIONS")
+    print(SEP)
+
+    import fastmem
+
+    # A wrong literal made every fastmem_open_ex(pid, FM_ALL_ACCESS) fail
+    # with error 5. csrc/fastmem.c rejects a divergence from the SDK at
+    # build time; this catches the value even when the DLL is not built.
+    package_dir = os.path.dirname(os.path.abspath(fastmem.__file__))
+    header = os.path.join(os.path.dirname(os.path.dirname(package_dir)),
+                          "csrc", "fastmem.h")
+    if os.path.isfile(header):
+        with open(header, encoding="utf-8") as fh:
+            text = fh.read()
+        found = re.search(r"^#define\s+FM_ALL_ACCESS\s+(0x[0-9A-Fa-f]+)",
+                          text, re.MULTILINE)
+        assert found, "FM_ALL_ACCESS is missing from csrc/fastmem.h"
+        value = int(found.group(1), 16)
+        assert value == 0x001FFFFF, \
+            "FM_ALL_ACCESS is 0x{:X}, expected 0x001FFFFF".format(value)
+        ok("FM_ALL_ACCESS matches PROCESS_ALL_ACCESS")
+    else:
+        ok("csrc/fastmem.h not available, access mask check skipped")
+
+    # check_git_clean returned (tags, 0) on a clean tree, and main()
+    # added that tuple to an int, so a clean tree crashed the release
+    # check instead of reporting it ready.
+    import importlib.util
+    from unittest import mock
+
+    root = os.path.dirname(os.path.dirname(package_dir))
+    checker = os.path.join(root, "tools", "release_check.py")
+    if os.path.isfile(checker):
+        spec = importlib.util.spec_from_file_location(
+            "fastmem_release_check", checker)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class _Clean:
+            stdout = ""
+
+        with mock.patch.object(module.subprocess, "run",
+                               return_value=_Clean()):
+            rc = module.check_git_clean()
+        assert type(rc) is int and rc == 0, rc
+        ok("check_git_clean returns int 0 on a clean tree")
+    else:
+        ok("tools/release_check.py not available, check skipped")
+
+    if not backend.HAVE_C:
+        ok("extension regressions skipped (pure Python)")
+        print()
+        return
+
+    # More workers than the fixed-size pool holds used to write past the
+    # end of g_pool and crash the interpreter. Run in a child so a
+    # regression fails this test instead of taking the suite down.
+    child = """\
+import ctypes, os
+from fastmem import Process, backend
+p = Process(os.getpid())
+buf = (ctypes.c_char * 4096)()
+base = ctypes.addressof(buf)
+addrs = [base + i * 8 for i in range(200)]
+expected = p.read_many(addrs, 8, span=0)
+assert all(v is not None for v in expected)
+for workers in (33, 64):
+    assert p.read_many(addrs, 8, threads=workers, span=0) == expected
+    assert p.read_many(addrs, 8, into=True,
+                       threads=workers) == b"".join(expected)
+print(backend.pool_workers())
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(sys.path)
+    run = subprocess.run([sys.executable, "-c", child], capture_output=True,
+                         text=True, env=env, timeout=120)
+    assert run.returncode == 0, run.stderr
+    assert int(run.stdout.strip()) <= 32, run.stdout
+    ok("worker requests above the pool cap are clamped")
+
+    with Process(os.getpid()) as p:
+        _keep, addr = cbuf(b"\xA5" * 16)
+        immutable = {
+            "single": lambda: backend.single(p.handle, addr, 8,
+                                             b"\x00" * 8),
+            "single_bytes": lambda: backend.single_bytes(
+                p.handle, addr, 8, b"\x00" * 8),
+            "batch_into": lambda: backend.batch_into(
+                p.handle, [addr], 8, b"\x00" * 8),
+            "pool_into": lambda: backend.pool_into(
+                p.handle, [addr], 8, b"\x00" * 8, 2),
+            "batch_grouped": lambda: backend._c.batch_grouped(
+                p.handle, backend.address_buffer([addr]), 8, 16,
+                b"\x00" * 8),
+        }
+        for label, call in immutable.items():
+            try:
+                call()
+                raise AssertionError(
+                    "{} accepted immutable bytes".format(label))
+            except TypeError as exc:
+                assert "read-write" in str(exc), (label, str(exc))
+        ok("output buffers must be writable")
+
+        # Py_BuildValue("nO", ...) incremented the mask reference without
+        # releasing its own, so every into=True read leaked the mask.
+        arr = backend.address_buffer([addr, addr])
+        out = bytearray(16)
+        entries = (
+            ("batch_release",
+             lambda: backend._c.batch_release(p.handle, arr, 8, out)),
+            ("batch_pooled",
+             lambda: backend._c.batch_pooled(p.handle, arr, 8, out, 2)),
+            ("batch_nogil",
+             lambda: backend._c.batch_nogil(p.handle, arr, 8, out)),
+            ("batch_grouped",
+             lambda: backend._c.batch_grouped(p.handle, arr, 8, 16, out)),
+        )
+        for label, call in entries:
+            result = call()
+            mask = result[1]
+            del result
+            refs = sys.getrefcount(mask)
+            assert refs == 2, \
+                "{} leaked a mask reference (refcount {})".format(label, refs)
+        ok("batch masks are owned by their tuples, not leaked")
+
+        # batch_grouped exported the writable buffer, then returned on
+        # size <= 0 without releasing it. The bytearray stayed locked and
+        # could not be resized.
+        out = bytearray(8)
+        try:
+            backend._c.batch_grouped(p.handle, backend.address_buffer([addr]),
+                                     0, 16, out)
+            raise AssertionError("expected ValueError for size=0")
+        except ValueError:
+            pass
+        out.append(0)
+        assert len(out) == 9
+        ok("batch_grouped releases the output buffer when size <= 0")
+
+        backend.pool_shutdown()
+    print()
+
+
 def test_sources():
     """The package's own source files must be clean UTF-8 without a BOM.
 
@@ -863,6 +1079,7 @@ TESTS = [
     test_foreign,
     test_threads,
     test_integrity,
+    test_critical_regressions,
     test_sources,
 ]
 

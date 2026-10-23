@@ -15,6 +15,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The literal once read 0x1FFFFF1F, which OpenProcess rejects with error 5.
+ * This check lives here rather than in the header because the header must
+ * stay usable without including windows.h. */
+#if FM_ALL_ACCESS != PROCESS_ALL_ACCESS
+#  error "FM_ALL_ACCESS must match PROCESS_ALL_ACCESS"
+#endif
+
 /* Injected by tools/build_native.py from pyproject.toml. The fallback is
  * for a manual compile outside the build system. */
 #ifndef FASTMEM_VERSION
@@ -341,6 +348,7 @@ static size_t run_grouped(HANDLE handle, const uintptr_t *addrs, size_t count,
     size_t *order;
     unsigned char *scratch;
     size_t i, ok = 0;
+    DWORD err = 0;
 
     if (count > (size_t)-1 / size || span > (size_t)-1 / count + 1) {
         set_lib_error(FM_ERR_OVERFLOW);
@@ -393,13 +401,23 @@ static size_t run_grouped(HANDLE handle, const uintptr_t *addrs, size_t count,
                     mask[idx] = 1;
                 ++ok;
             }
+        } else {
+            size_t k;
+            /* The mask is caller-owned and may be pre-filled: every
+             * address in a failed window must read 0, not stale data. */
+            if (mask) {
+                for (k = i; k <= j; ++k)
+                    mask[order[k]] = 0;
+            }
+            if (!err)
+                err = GetLastError();
         }
         i = j + 1;
     }
 
     free(scratch);
     free(order);
-    g_last_error = 0;
+    g_last_error = err;
     g_sticky_error = 0;
     return ok;
 }
@@ -721,6 +739,7 @@ typedef struct {
     HANDLE handle;
     const uintptr_t *addrs;
     size_t count, size, first, last;
+    size_t ok;              /* successes in the last chunk */
     unsigned char *out;
     unsigned char *mask;
     LONG shutdown;
@@ -729,20 +748,34 @@ typedef struct {
 static fm_worker g_pool[FM_POOL_MAX];
 static unsigned g_pool_size = 0;
 static CRITICAL_SECTION g_pool_lock;
-static LONG g_pool_ready = 0;
+/* 0 = uninitialised, 1 = another thread is initialising, 2 = ready. */
+static LONG g_pool_state = 0;
 static HANDLE g_chunk_done = NULL;   /* counting semaphore */
 
 static void ensure_pool(void)
 {
-    if (InterlockedCompareExchange(&g_pool_ready, 1, 0) == 0) {
+    LONG state = InterlockedCompareExchange(&g_pool_state, 0, 0);
+
+    if (state == 2)
+        return;
+    if (InterlockedCompareExchange(&g_pool_state, 1, 0) == 0) {
         InitializeCriticalSection(&g_pool_lock);
         g_chunk_done = CreateSemaphore(NULL, 0, FM_POOL_MAX, NULL);
+        /* Published last: a thread that sees 2 must also see the lock and
+         * semaphore fully initialised. */
+        InterlockedExchange(&g_pool_state, 2);
+    }
+    else {
+        /* Another thread is initialising; the work is a few API calls, so
+         * spinning cannot meaningfully waste CPU and cannot deadlock. */
+        while (InterlockedCompareExchange(&g_pool_state, 0, 0) != 2)
+            Sleep(0);
     }
 }
 
 static void run_range(fm_worker *w)
 {
-    size_t i;
+    size_t i, ok = 0;
     SIZE_T got = 0;
     DWORD err = 0;
 
@@ -753,6 +786,7 @@ static void run_range(fm_worker *w)
             && got == (SIZE_T)w->size) {
             if (w->mask)
                 w->mask[i] = 1;
+            ++ok;
         } else {
             if (w->mask)
                 w->mask[i] = 0;
@@ -760,6 +794,7 @@ static void run_range(fm_worker *w)
                 err = GetLastError();
         }
     }
+    w->ok = ok;
     if (err && !g_last_error)
         g_last_error = err;
 }
@@ -805,6 +840,7 @@ static void pool_assign(HANDLE handle, const uintptr_t *addrs, size_t count,
         w->mask = mask;
         w->first = first;
         w->last = last;
+        w->ok = 0;
         SetEvent(w->wake);
     }
 }
@@ -833,6 +869,10 @@ size_t fastmem_pool_read_many(fastmem_proc *proc, const uintptr_t *addrs,
     }
     if (workers < 1)
         workers = 1;
+    /* g_pool has FM_POOL_MAX slots; without this a larger request indexes
+     * past the end of the array while creating workers. */
+    if (workers > FM_POOL_MAX)
+        workers = FM_POOL_MAX;
     if ((size_t)workers > count - 1)
         workers = (unsigned)(count - 1);   /* the caller takes a chunk */
     if (workers < 1)
@@ -898,6 +938,11 @@ size_t fastmem_pool_read_many(fastmem_proc *proc, const uintptr_t *addrs,
         ++done;
     }
 
+    /* The caller counted only its own chunk. Without adding the helpers'
+     * chunks a 4-worker read of 200 addresses reported 50 successes. */
+    for (i = 1; i < workers; ++i)
+        ok += g_pool[i].ok;
+
     LeaveCriticalSection(&g_pool_lock);
     return ok;
 }
@@ -906,7 +951,7 @@ unsigned fastmem_pool_workers(void)
 {
     unsigned n;
 
-    if (!g_pool_ready)
+    if (InterlockedCompareExchange(&g_pool_state, 0, 0) != 2)
         return 0;
     EnterCriticalSection(&g_pool_lock);
     n = g_pool_size;
@@ -918,7 +963,7 @@ void fastmem_pool_shutdown(void)
 {
     unsigned i;
 
-    if (!g_pool_ready)
+    if (InterlockedCompareExchange(&g_pool_state, 0, 0) != 2)
         return;
     EnterCriticalSection(&g_pool_lock);
     for (i = 0; i < g_pool_size; ++i) {

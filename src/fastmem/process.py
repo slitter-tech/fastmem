@@ -623,6 +623,12 @@ class Process:
         if size <= 0:
             return bytearray() if into else [None] * count
 
+        # Resolve auto before the threading branch: a negative value used
+        # to fall through `threads > 1` and silently take the single-
+        # threaded path, making the documented -1 a no-op.
+        if threads < 0:
+            threads = os.cpu_count() or 1
+
         if span < 0:
             span = self._page_size << 2
 

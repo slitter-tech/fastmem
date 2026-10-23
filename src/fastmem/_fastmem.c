@@ -80,9 +80,9 @@ typedef struct {
  * Release the parsed buffers.
  *
  * The mask is deliberately NOT released here: it is handed to the caller
- * through Py_BuildValue, so a Py_XDECREF(mask) before that would be a
- * use-after-free (observed as an access violation). Ownership of mask
- * transfers to the returned tuple.
+ * through Py_BuildValue with an "N", which steals the reference. Passing
+ * "O" instead would increment the reference and leak the original one on
+ * every call.
  */
 static void
 release_batch(Py_buffer *abuf, Py_buffer *obuf)
@@ -109,7 +109,7 @@ parse_batch(PyObject *args, PyObject *kwds, batch_ctx *ctx, Py_buffer *abuf,
     memset(abuf, 0, sizeof(*abuf));
     memset(obuf, 0, sizeof(*obuf));
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Ky*ny*", kw, &handle, abuf,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Ky*nw*", kw, &handle, abuf,
                                      &ctx->size, obuf))
         return 0;
 
@@ -238,13 +238,15 @@ typedef struct {
     batch_ctx ctx;          /* the job, filled in by the dispatcher */
     Py_ssize_t first;
     Py_ssize_t last;
+    Py_ssize_t ok;          /* successes in the last chunk */
     volatile LONG shutdown;
 } worker_t;
 
 static worker_t g_pool[POOL_MAX];
 static int g_pool_size = 0;     /* workers created so far */
 static CRITICAL_SECTION g_pool_lock;
-static LONG g_pool_ready = 0;
+/* 0 = uninitialised, 1 = another thread is initialising, 2 = ready. */
+static LONG g_pool_state = 0;
 /* Counting semaphore, not an event: pool_dispatch has to count finished
  * chunks, and a counting semaphore releases exactly one waiter per
  * ReleaseSemaphore while an auto-reset event would behave the same but a
@@ -254,9 +256,23 @@ static HANDLE g_chunk_done = NULL;
 static void
 ensure_pool_init(void)
 {
-    if (InterlockedCompareExchange(&g_pool_ready, 1, 0) == 0) {
+    LONG state = InterlockedCompareExchange(&g_pool_state, 0, 0);
+
+    if (state == 2)
+        return;
+    if (InterlockedCompareExchange(&g_pool_state, 1, 0) == 0) {
         InitializeCriticalSection(&g_pool_lock);
         g_chunk_done = CreateSemaphore(NULL, 0, POOL_MAX, NULL);
+        /* Published last: another thread that sees 2 must also see a
+         * fully initialised lock and semaphore. */
+        InterlockedExchange(&g_pool_state, 2);
+    }
+    else {
+        /* Another thread is initialising. The work is a few API calls, so
+         * spinning is cheaper than an event, and it cannot deadlock: the
+         * initialising thread never waits for this one. */
+        while (InterlockedCompareExchange(&g_pool_state, 0, 0) != 2)
+            Sleep(0);
     }
 }
 
@@ -284,6 +300,7 @@ pool_assign(batch_ctx *ctx, int nworkers, Py_ssize_t chunk)
         g_pool[i].ctx = *ctx;
         g_pool[i].first = first;
         g_pool[i].last = last;
+        g_pool[i].ok = 0;
         /* Only SetEvent: the worker resets its own event on waking. A
          * ResetEvent here would be wrong, because a worker that has not yet
          * looped back into the wait would miss the signal entirely. */
@@ -319,6 +336,7 @@ worker_main(LPVOID arg)
          * could happen while the loop above is still unwinding. */
         ctx = w->ctx;
         batch_run_range(&ctx, w->first, w->last, &ok, &err);
+        w->ok = ok;
         if (err)
             InterlockedCompareExchange((LONG *)&last_read_error, (LONG)err,
                                        (LONG)last_read_error);
@@ -338,6 +356,13 @@ pool_dispatch(batch_ctx *ctx, int nworkers)
 {
     Py_ssize_t chunk, ok = 0, i;
     int done = 0;
+
+    /* g_pool has POOL_MAX slots, so a larger request would index past the
+     * end of the array while creating workers. */
+    if (nworkers > POOL_MAX)
+        nworkers = POOL_MAX;
+    if (nworkers < 1)
+        nworkers = 1;
 
     EnterCriticalSection(&g_pool_lock);
 
@@ -408,6 +433,12 @@ pool_dispatch(batch_ctx *ctx, int nworkers)
         ++done;
     }
 
+    /* The caller only counted its own chunk. Sum the helpers' chunks too:
+     * returning just the caller's share made a 4-worker read of 200
+     * addresses report 50 successes. */
+    for (i = 1; i < nworkers; ++i)
+        ok += g_pool[i].ok;
+
     LeaveCriticalSection(&g_pool_lock);
     return ok;
 }
@@ -421,7 +452,7 @@ pool_shutdown(void)
 {
     int i;
 
-    if (!g_pool_ready)
+    if (InterlockedCompareExchange(&g_pool_state, 0, 0) != 2)
         return;
     EnterCriticalSection(&g_pool_lock);
     for (i = 0; i < g_pool_size; ++i) {
@@ -474,7 +505,7 @@ batch_release(PyObject *self, PyObject *args, PyObject *kwds)
     Py_END_ALLOW_THREADS
 
     release_batch(&abuf, &obuf);
-    return Py_BuildValue("nO", ok, mask);
+    return Py_BuildValue("nN", ok, mask);
 }
 
 /*
@@ -509,7 +540,7 @@ batch_pooled(PyObject *self, PyObject *args, PyObject *kwds)
          * takes a fixed keyword list without the worker count. The checks
          * it performs are repeated below so both entry points reject the
          * same inputs. */
-        if (!PyArg_ParseTupleAndKeywords(args, kwds, "Ky*ny*i", kw, &handle,
+        if (!PyArg_ParseTupleAndKeywords(args, kwds, "Ky*nw*i", kw, &handle,
                                          &abuf, &ctx.size, &obuf, &workers))
             return NULL;
         if (ctx.size <= 0) {
@@ -546,7 +577,7 @@ batch_pooled(PyObject *self, PyObject *args, PyObject *kwds)
     Py_END_ALLOW_THREADS
 
     release_batch(&abuf, &obuf);
-    return Py_BuildValue("nO", ok, mask);
+    return Py_BuildValue("nN", ok, mask);
 }
 
 /*
@@ -670,7 +701,7 @@ batch_nogil(PyObject *self, PyObject *args, PyObject *kwds)
     ok = batch_run(&ctx);
 
     release_batch(&abuf, &obuf);
-    return Py_BuildValue("nO", ok, mask);
+    return Py_BuildValue("nN", ok, mask);
 }
 
 /*
@@ -932,10 +963,11 @@ batch_grouped(PyObject *self, PyObject *args, PyObject *kwds)
     memset(&abuf, 0, sizeof(abuf));
     memset(&obuf, 0, sizeof(obuf));
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Ky*nKy*", kw, &handle,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Ky*nKw*", kw, &handle,
                                      &abuf, &size, &span, &obuf))
         return NULL;
     if (size <= 0) {
+        release_batch(&abuf, &obuf);
         PyErr_SetString(PyExc_ValueError, "size must be positive");
         return NULL;
     }
@@ -1053,7 +1085,7 @@ batch_grouped(PyObject *self, PyObject *args, PyObject *kwds)
     PyMem_Free(order);
     PyBuffer_Release(&abuf);
     PyBuffer_Release(&obuf);
-    return Py_BuildValue("nO", ok, mask_obj);
+    return Py_BuildValue("nN", ok, mask_obj);
 }
 
 /*
@@ -1264,7 +1296,7 @@ one(PyObject *self, PyObject *args)
     Py_buffer out;
     int r;
 
-    if (!PyArg_ParseTuple(args, "KKny*", &handle, &addr, &size, &out))
+    if (!PyArg_ParseTuple(args, "KKnw*", &handle, &addr, &size, &out))
         return NULL;
 
     /* Not reachable from Process.read (which passes a 4 KiB scratch
@@ -1306,7 +1338,7 @@ one_or(PyObject *self, PyObject *args)
     PyObject *result;
     int r;
 
-    if (!PyArg_ParseTuple(args, "KKny*", &handle, &addr, &size, &out))
+    if (!PyArg_ParseTuple(args, "KKnw*", &handle, &addr, &size, &out))
         return NULL;
 
     if (size > ONE_SCRATCH) {
@@ -1375,7 +1407,7 @@ pool_workers(PyObject *self, PyObject *unused)
 {
     int n;
 
-    if (!g_pool_ready)
+    if (InterlockedCompareExchange(&g_pool_state, 0, 0) != 2)
         return PyLong_FromLong(0);
     EnterCriticalSection(&g_pool_lock);
     n = g_pool_size;

@@ -102,6 +102,13 @@ def check_native():
         if needle not in run.stdout:
             return fail("quickstart.exe output missing {!r}".format(needle))
     ok("quickstart.exe runs and locates its marker")
+
+    run = subprocess.run([sys.executable, "-m", "tests.test_native"],
+                         cwd=ROOT, capture_output=True, text=True)
+    if run.returncode != 0:
+        return fail("native regressions failed:\n{}".format(
+            run.stdout[-800:]))
+    ok("native regression tests passed")
     return 0
 
 
@@ -126,10 +133,7 @@ def check_git_clean():
     if staged:
         return fail("uncommitted changes:\n  " + "\n  ".join(staged))
     ok("working tree is clean")
-
-    tags = subprocess.run(["git", "tag", "-l", "v*"], cwd=ROOT,
-                          capture_output=True, text=True).stdout.split()
-    return tags, 0
+    return 0
 
 
 def main():

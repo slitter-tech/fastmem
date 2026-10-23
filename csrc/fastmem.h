@@ -67,7 +67,7 @@ typedef struct fastmem_proc fastmem_proc;
 #define FM_QUERY_LIMITED   0x1000      /* PROCESS_QUERY_LIMITED_INFORMATION */
 #define FM_VM_WRITE        0x0020      /* PROCESS_VM_WRITE */
 #define FM_VM_OPERATION    0x0008      /* PROCESS_VM_OPERATION */
-#define FM_ALL_ACCESS      0x1FFFFF1F  /* PROCESS_ALL_ACCESS */
+#define FM_ALL_ACCESS      0x001FFFFF  /* PROCESS_ALL_ACCESS */
 
 /*
  * Region flags.
