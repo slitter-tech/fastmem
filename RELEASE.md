@@ -45,7 +45,7 @@ rather than uploading the wrong number.
 | `fastmem-0.1.1-cp3X-cp3X-win_arm64.whl` | ARM64, Python 3.9-3.13 |
 | `fastmem-0.1.1.tar.gz` | sources; the extension builds on install |
 
-Eighteen wheels: three architectures times six interpreter minors. x86 and
+Fifteen wheels: three architectures times five interpreter minors. x86 and
 ARM64 are cross-compiled from the x64 runner, which works because
 `setup.py` reads `FASTMEM_BUILD_ARCH` and picks the matching MSVC and SDK
 library directories.
