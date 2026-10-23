@@ -55,6 +55,8 @@ def main():
     with_example = "--example" in args
 
     paths = load_paths()
+    import project_version
+    version = project_version.read_version(ROOT)
     _install, msvc = paths.find_msvc()
     if not msvc:
         print("no MSVC toolset found", file=sys.stderr)
@@ -85,6 +87,7 @@ def main():
         "/wd4996",                  # "deprecated or CRT header" noise
         "/DWIN32_LEAN_AND_MEAN",
         "/D_CRT_SECURE_NO_WARNINGS",
+        "/DFASTMEM_VERSION=\"{}\"".format(version),
         "/LD",                      # build a DLL
     ]
     for path in includes:

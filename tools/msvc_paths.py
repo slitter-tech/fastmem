@@ -9,12 +9,12 @@ these functions failed there with ModuleNotFoundError: No module named
 """
 
 import os
+import string
 import subprocess
 import sys
 
 # Windows SDK versions seen in the wild. Listed explicitly because the SDK
-# is not always in the default location (e.g. G:\Windows Kits\10) and
-# vcvars does not know about it.
+# is not always in the default location and vcvars does not know about it.
 SDK_LIB_VERSIONS = (
     "10.0.26100.0",
     "10.0.22621.0",
@@ -23,11 +23,12 @@ SDK_LIB_VERSIONS = (
     "10.0.19041.0",
 )
 
+# System-drive locations. The SDK is also installed on data drives on some
+# machines; those are found by scanning drive letters in sdk_roots() rather
+# than by hardcoding one machine's layout into the repository.
 SDK_ROOTS = (
     r"C:\Program Files (x86)\Windows Kits\10",
     r"C:\Program Files\Windows Kits\10",
-    r"G:\Windows Kits\10",
-    r"D:\Windows Kits\10",
 )
 
 # Architecture names, as FASTMEM_BUILD_ARCH spells them.
@@ -57,6 +58,12 @@ def sdk_roots():
     if env:
         roots.append(env.rstrip("\\/"))
     roots.extend(p for p in SDK_ROOTS if os.path.isdir(p))
+    # The SDK also lands on a data drive on some machines. Scanning the
+    # drive letters beats keeping one machine's layout in the repository.
+    for letter in string.ascii_uppercase:
+        candidate = "{}:\\Windows Kits\\10".format(letter)
+        if os.path.isdir(candidate):
+            roots.append(candidate)
 
     seen = set()
     out = []

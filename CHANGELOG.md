@@ -4,6 +4,51 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Correctness release. No API changes except the two documented below; every
+item here was reachable from the public surface.
+
+### Fixed
+
+- `read_many(..., span=N)` with `N` smaller than `size` read past the end of
+  the C scratch buffer and returned neighbouring heap instead of process
+  memory: the grouping window was clamped to `span` while the copy still
+  took `size` bytes. `p.read_many(addrs, 8, span=4)` was enough to hit it.
+  The window now widens to at least one value. The standalone C library
+  (`csrc/fastmem.c`) already clamped this; the extension did not.
+- `find(..., align=N, chunk_size=M)` with `N > 1` returned nothing.
+  Alignment was applied to the offset inside the window, but a chunked scan
+  starts its window at a carried tail, so every hit was shifted by the
+  window's own misalignment.
+- `find(..., align=3)` and any other non-power-of-two alignment reported the
+  wrong addresses: the mask shortcut only holds for powers of two.
+- `find(..., chunk_size=M)` could report matches that do not exist after an
+  unreadable block: the carried tail from before the hole was prepended to
+  the next block, joining two ranges that were never adjacent.
+- The pure-Python batch path handed `ReadProcessMemory` the address of a
+  temporary buffer that had already been freed. Every `read_many` with
+  `size > SCRATCH_SIZE` on the `python-ctypes` backend wrote into reclaimed
+  heap.
+- `backend.batch_into` on the pure-Python path raised `NameError` instead of
+  reading: the call passed a variable that did not exist.
+- `regions()` and `query()` shared one module-global
+  `MEMORY_BASIC_INFORMATION`, so two threads walking different processes
+  could read each other's region data. It is now per-thread.
+- `one()` accepted a buffer shorter than `size`; `ReadProcessMemory` then
+  wrote past its end. `backend.single` is public, so this was reachable.
+- Buffer objects were not released on several error paths in the extension,
+  leaving buffers permanently exported.
+
+### Changed
+
+- `read_many(..., as_=..., into=True)` now raises `ValueError`. It used to
+  return the packed bytearray and silently drop `as_`.
+- The extension reports the version from `pyproject.toml` instead of its own
+  hardcoded string, so it cannot drift from the package. Same for
+  `fastmem_version()` in the C library.
+- SDK discovery scans drive letters instead of listing one machine's path.
+
 ## [0.1.0]
 
 First public release.

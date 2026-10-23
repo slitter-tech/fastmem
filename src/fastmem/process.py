@@ -183,11 +183,18 @@ class Region:
 # Pattern search
 # --------------------------------------------------------------------------
 
-def _find_all(blob: bytes, pattern: bytes, alignment: int) -> Iterator[int]:
+def _find_all(blob: bytes, pattern: bytes, alignment: int,
+              base_addr: int = 0) -> Iterator[int]:
     """Offsets of ``pattern`` in ``blob`` through the C ``bytes.find``.
 
-    Alignment is checked arithmetically rather than by searching again:
-    one ``&`` per hit instead of a second pass over the string.
+    Alignment applies to the absolute address ``base_addr + offset``, not
+    to the offset inside ``blob``: a chunked scan hands over a window that
+    starts partway into a region, and aligning window-relative would shift
+    every hit by the window's own misalignment.
+
+    Power-of-two alignments are checked with a mask, one ``&`` per hit.
+    Any other alignment falls back to ``%``, which is what makes ``align=3``
+    mean what it says instead of silently reporting every third hit.
     """
     find = blob.find
     pos = find(pattern)
@@ -195,12 +202,22 @@ def _find_all(blob: bytes, pattern: bytes, alignment: int) -> Iterator[int]:
         while pos != -1:
             yield pos
             pos = find(pattern, pos + 1)
-    else:
-        mask = alignment - 1
+        return
+
+    mask = alignment - 1
+    if alignment & mask:
+        # Not a power of two.
         while pos != -1:
-            if not pos & mask:
+            if not (base_addr + pos) % alignment:
                 yield pos
             pos = find(pattern, pos + 1)
+        return
+
+    start = base_addr & mask
+    while pos != -1:
+        if not (start + pos) & mask:
+            yield pos
+        pos = find(pattern, pos + 1)
 
 
 # --------------------------------------------------------------------------
@@ -554,7 +571,8 @@ class Process:
             four pages, which covers a typical object; ``0`` disables
             grouping. Nearby addresses are the common case in real work -
             object fields, array elements, list nodes - and grouping is up
-            to 23x faster than reading them one by one.
+            to 67x faster than reading them one by one (README has the
+            measurement table).
         :param threads: helper threads for the read. ``0`` means one; above
             one, the addresses are split across persistent worker threads
             and the calling thread takes a share too. ``-1`` uses
@@ -571,6 +589,7 @@ class Process:
             threads do.
         :return: list of ``bytes``/None, list of numbers/None, or bytearray.
         :raises ProcessClosedError: the handle was already released.
+        :raises ValueError: ``as_`` was given together with ``into=True``.
 
         Example::
 
@@ -587,6 +606,15 @@ class Process:
             fmt = None
         else:
             fmt = None
+
+        if into and fmt is not None:
+            # into=True packs raw bytes; there is no slot for an interpreted
+            # value. Silently ignoring as_ would hand back a bytearray to a
+            # caller who asked for numbers.
+            raise ValueError(
+                "as_= has no meaning with into=True: the result is packed "
+                "raw bytes. Drop one of the two."
+            )
 
         addrs = addrs if isinstance(addrs, (list, tuple)) else list(addrs)
         count = len(addrs)
@@ -634,8 +662,15 @@ class Process:
 
     def _read_many_py(self, handle, addrs, size) -> List[Optional[bytes]]:
         """Pure Python batch, used when the extension is absent."""
-        buf_addr = (self._buf_addr if size <= SCRATCH_SIZE
-                    else _addressof(_new_buf(size)))
+        if size <= SCRATCH_SIZE:
+            buf_addr = self._buf_addr
+            held = None
+        else:
+            # The buffer has to stay referenced for the whole loop: passing
+            # addressof(_new_buf(size)) lets the temporary die before the
+            # first ReadProcessMemory, which then writes into freed heap.
+            held = _new_buf(size)
+            buf_addr = _addressof(held)
         rpm = self._rpm
         string_at = _string_at
         out: List[Optional[bytes]] = []
@@ -788,7 +823,7 @@ class Process:
             raise ProcessClosedError(addr, 0, 0)
         if w.VirtualQueryEx is None:
             return None
-        mbi = w.shared_mbi
+        mbi = w.shared_mbi()
         if not w.VirtualQueryEx(handle, addr, _byref(mbi), w.mbi_size):
             return None
         return Region._from_mbi(mbi)
@@ -825,7 +860,7 @@ class Process:
             return
 
         vq = w.VirtualQueryEx
-        mbi = w.shared_mbi
+        mbi = w.shared_mbi()
         addr = start
 
         while True:
@@ -906,15 +941,15 @@ class Process:
             if chunk_size <= 0:
                 blob = self.read_region(base, remaining, or_none=True)
                 if blob:
-                    for off in _find_all(blob, pattern, align):
+                    for off in _find_all(blob, pattern, align, base):
                         yield base + off
                         found += 1
                         if limit and found >= limit:
                             return
                 continue
 
-            # Blocked read: overlap by needle-1 bytes so a match spanning
-            # two blocks survives.
+            # Blocked read: carry needle-1 bytes so a match spanning two
+            # blocks survives.
             offset = 0
             tail = b""
             tail_addr = 0
@@ -926,7 +961,7 @@ class Process:
                     window = tail + blob
                     window_addr = tail_addr if tail else base + offset
                     limit_off = len(window) - needle + 1
-                    for off in _find_all(window, pattern, align):
+                    for off in _find_all(window, pattern, align, window_addr):
                         if limit_off > 0 and off >= limit_off:
                             break
                         yield window_addr + off
@@ -940,6 +975,13 @@ class Process:
                     else:
                         tail = window
                         tail_addr = window_addr
+                else:
+                    # An unreadable block leaves a hole. The tail from
+                    # before it is no longer adjacent to what comes next,
+                    # so carrying it over would join two ranges that never
+                    # touched and invent matches in the seam.
+                    tail = b""
+                    tail_addr = 0
                 offset += n
 
     # ------------------------------------------------------------------

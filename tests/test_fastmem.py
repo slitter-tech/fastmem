@@ -18,6 +18,7 @@ import threading
 import time
 
 from fastmem import (
+    SCRATCH_SIZE,
     FastMemError,
     Process,
     ProcessClosedError,
@@ -239,8 +240,26 @@ def test_batch():
         chunk = bytes(range(251)) + b"\x00" * 5
         _keep_chunk, caddr = cbuf(chunk)
         assert p.read_many([caddr, caddr], len(chunk)) == [chunk, chunk]
-        ok("read_many(size={} > SCRATCH_SIZE)".format(len(chunk)))
+        ok("read_many(size={}) below SCRATCH_SIZE".format(len(chunk)))
 
+        # Regression: the pure-Python batch handed ReadProcessMemory the
+        # address of a temporary buffer that had already been freed, so a
+        # read above the scratch size wrote into reclaimed heap. The old
+        # test passed 256 bytes and claimed to cover this, which is why the
+        # bug lived: 256 < SCRATCH_SIZE takes the reusable-buffer path.
+        big = bytes(range(256)) * 32              # 8192 > SCRATCH_SIZE
+        assert len(big) > SCRATCH_SIZE
+        _keep_big, big_addr = cbuf(big)
+        had_c = backend.HAVE_C
+        backend.HAVE_C = False
+        try:
+            assert p.read_many([big_addr, big_addr], len(big)) == [big, big]
+            mixed_big = p.read_many([big_addr, 0x0], len(big))
+            assert mixed_big[0] == big and mixed_big[1] is None
+        finally:
+            backend.HAVE_C = had_c
+        ok("pure-Python batch of size {} > SCRATCH_SIZE reads the real "
+           "bytes".format(len(big)))
         into = p.read_many([addr, 0x0, addr + 8], 4, into=True)
         assert isinstance(into, bytearray) and len(into) == 12
         assert into[0:4] == payload[0:4]
@@ -270,6 +289,28 @@ def test_batch():
         assert p.read_many(clustered, 4, span=4) == expect     # span = size
         assert p.read_many(clustered, 4, span=1 << 16) == expect
         ok("span grouping matches ungrouped results")
+
+        # Regression: with span < size the C window was clamped to span and
+        # the copy then took `size` bytes out of it, returning neighbouring
+        # heap and reading past the scratch allocation. The window has to
+        # widen to at least one value.
+        for span in (1, 2, 3, 4):
+            assert p.read_many(clustered, 4, span=span) == expect, \
+                "span={} changed the data".format(span)
+        wide = [base + i * 16 for i in range(8)]
+        wide_expect = [clus[i * 16:i * 16 + 8] for i in range(8)]
+        for span in (1, 4, 7):
+            assert p.read_many(wide, 8, span=span) == wide_expect, span
+        ok("span narrower than size is widened, never truncated")
+
+        # into=True has no slot for an interpreted value: silently dropping
+        # as_ handed a bytearray to a caller who asked for numbers.
+        try:
+            p.read_many([addr], 8, as_="ptr", into=True)
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+        ok("into=True with as_ raises instead of ignoring as_")
 
         for seed in range(20):
             sh = list(clustered)
@@ -358,6 +399,26 @@ def test_regions():
         assert list(p.find(b"\xAB\xAB\xAB\xAB", regions=[areg], align=4)) \
             == exp_aln
         ok("align=4 keeps {} of {} hits".format(len(exp_aln), len(exp_all)))
+
+        # Regression: chunked search aligned the offset inside the window,
+        # but the window starts at a carried tail, so every hit was shifted
+        # by the window's own misalignment and align>1 found nothing.
+        assert list(p.find(needle, regions=[freg], align=8,
+                           chunk_size=256)) == hits
+        assert list(p.find(needle, regions=[freg], align=8,
+                           chunk_size=128)) == hits
+        ok("align=8 with chunk_size finds the same addresses")
+
+        # align must mean what it says for values that are not powers of
+        # two as well; the old mask check silently reported every third bs.
+        odd = b"\xCD" * 32
+        _keep_odd, odd_addr = cbuf(odd)
+        oreg = Region(odd_addr, len(odd), w.MEM_COMMIT, w.PAGE_READWRITE,
+                      w.MEM_PRIVATE)
+        exp3 = [odd_addr + i for i in range(len(odd))
+                if (odd_addr + i) % 3 == 0]
+        assert list(p.find(b"\xCD", regions=[oreg], align=3)) == exp3
+        ok("align=3 matches {} of 32 addresses".format(len(exp3)))
 
         assert list(p.find(b"", regions=[freg])) == []
         assert list(p.find(needle, regions=[])) == []
@@ -656,6 +717,107 @@ def test_threads():
     print()
 
 
+def test_integrity():
+    """Regressions that shipped because no test looked at them."""
+    print(SEP)
+    print("BACKEND INTEGRITY")
+    print(SEP)
+
+    import fastmem
+
+    # The extension used to carry its own hardcoded version string, so a
+    # bump in pyproject.toml would leave the binary claiming the old
+    # release while the package reported the new one.
+    if backend.HAVE_C:
+        ext = backend.extension_version()
+        assert ext == fastmem.__version__, \
+            "extension {} != package {}".format(ext, fastmem.__version__)
+        ok("extension version matches the package ({})".format(ext))
+    else:
+        ok("no extension loaded, version check skipped")
+
+    with Process(os.getpid()) as p:
+        if backend.HAVE_C:
+            # ReadProcessMemory would happily write past a short buffer.
+            try:
+                backend._c.one(p.handle, p._buf_addr, 64,
+                               memoryview(bytearray(4)))
+                raise AssertionError("expected BufferError")
+            except BufferError:
+                pass
+            ok("one() rejects a buffer shorter than size")
+
+        # The pure-Python batch entry point passed a name that did not
+        # exist, so every call raised NameError instead of reading.
+        payload = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+        _keep, addr = cbuf(payload)
+        out = (ctypes.c_char * 8)()
+        mask = backend._batch_into_py(p.handle, [addr, addr + 4], 4, out)
+        assert mask == b"\x01\x01", mask
+        assert bytes(out[:4]) == payload[:4]
+        assert bytes(out[4:]) == payload[4:]
+        # A view over a plain bytearray has no ctypes object behind it; it
+        # must still resolve to an address.
+        plain = bytearray(8)
+        backend._batch_into_py(p.handle, [addr, addr + 4], 4, memoryview(plain))
+        assert bytes(plain) == payload
+        ok("pure-Python batch_into writes the data and returns a mask")
+
+        # Region enumeration reused one module-global MBI, so two threads
+        # walking different processes could read each other's region data.
+        # Comparing region sets across time would be flaky (a live process
+        # maps and frees while the walk runs), so this asserts the mechanism
+        # directly, then exercises the walk from two threads.
+        from fastmem import _winapi as w
+
+        main_mbi = w.shared_mbi()
+        refs = []
+        done = threading.Event()
+
+        def grab():
+            refs.append(w.shared_mbi())
+            done.set()
+
+        th = threading.Thread(target=grab)
+        th.start()
+        done.wait(10)
+        th.join()
+        assert refs and refs[0] is not main_mbi, \
+            "a worker thread got the main thread's MBI"
+        assert w.shared_mbi() is main_mbi, \
+            "the same thread must reuse its own MBI"
+        ok("MEMORY_BASIC_INFORMATION is per-thread, not module-global")
+
+        proc, pid, _base = spawn_victim()
+        try:
+            procs = [Process(os.getpid()), Process(pid)]
+            results = []
+
+            def walk(pr):
+                regs = list(pr.regions())
+                assert regs, "empty walk"
+                assert all(a.base <= b.base for a, b in zip(regs, regs[1:])), \
+                    "regions must stay ordered under contention"
+                results.append(len(regs))
+
+            try:
+                threads = [threading.Thread(target=walk, args=(pr,))
+                           for pr in procs]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+            finally:
+                for pr in procs:
+                    pr.close()
+            assert len(results) == 2, "a walk raised under contention"
+            ok("two concurrent walks each return an ordered region list")
+        finally:
+            proc.kill()
+            proc.wait()
+    print()
+
+
 def test_sources():
     """The package's own source files must be clean UTF-8 without a BOM.
 
@@ -700,6 +862,7 @@ TESTS = [
     test_errors,
     test_foreign,
     test_threads,
+    test_integrity,
     test_sources,
 ]
 
@@ -711,6 +874,10 @@ def main():
     print("FASTMEM {} functional tests".format(fastmem.__version__))
     print("Python {}.{}  |  backend: {}".format(
         sys.version_info.major, sys.version_info.minor, Process.backend()))
+    # Printed because "python -m tests.test_fastmem" from a checkout will
+    # happily import an installed copy instead of the working tree, and a
+    # green run against the wrong sources looks exactly like a real one.
+    print("package: {}".format(fastmem.__file__))
     print(SEP)
 
     failed = []

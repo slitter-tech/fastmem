@@ -118,7 +118,7 @@ def batch_into(
         # mismatched values impossible.
         _ok, mask = _c.batch_release(handle, arr, size, out)
         return bytes(mask)
-    return _batch_into_py(handle, addresses, size, out, count)
+    return _batch_into_py(handle, addresses, size, out)
 
 
 def _batch_into_py(
@@ -126,20 +126,37 @@ def _batch_into_py(
     addresses: Sequence[int],
     size: int,
     out,
-    count: int,
 ) -> bytes:
     """Pure Python fallback. Same contract as the C version."""
     from . import _winapi as w
 
     rpm = w.ReadProcessMemory
+    count = len(addresses)
     mask = bytearray(count)
-    out_addr = out if isinstance(out, int) else ctypes.addressof(out)
+    out_addr = _buffer_address(out)
     offset = 0
     for i, addr in enumerate(addresses):
         if rpm(handle, addr, out_addr + offset, size, None):
             mask[i] = 1
         offset += size
     return bytes(mask)
+
+
+def _buffer_address(out) -> int:
+    """Address of a writable buffer given as an int, ctypes object or view.
+
+    memoryview has no addressof: it exposes the underlying object through
+    ``.obj``, which is what ctypes needs. A view over a plain bytearray is
+    still not a ctypes object, so that case borrows a one-byte c_char view
+    of the same memory to get hold of the address.
+    """
+    if isinstance(out, int):
+        return out
+    target = out.obj if isinstance(out, memoryview) else out
+    try:
+        return ctypes.addressof(target)
+    except TypeError:
+        return ctypes.addressof(ctypes.c_char.from_buffer(target))
 
 
 def batch_bytes(
@@ -258,9 +275,7 @@ def single(handle: int, address: int, size: int, out) -> bool:
 
     from . import _winapi as w
 
-    buf = out if isinstance(out, int) else ctypes.addressof(
-        out.obj if hasattr(out, "obj") else out
-    )
+    buf = _buffer_address(out)
     return bool(w.ReadProcessMemory(handle, address, buf, size, None))
 
 
@@ -275,7 +290,7 @@ def single_bytes(handle: int, address: int, size: int, out):
 
     from . import _winapi as w
 
-    addr = out if isinstance(out, int) else ctypes.addressof(out)
+    addr = _buffer_address(out)
     if w.ReadProcessMemory(handle, address, addr, size, None):
         return ctypes.string_at(addr, size)
     return None

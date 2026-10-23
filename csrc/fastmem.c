@@ -15,6 +15,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Injected by tools/build_native.py from pyproject.toml. The fallback is
+ * for a manual compile outside the build system. */
+#ifndef FASTMEM_VERSION
+#define FASTMEM_VERSION "0.0.0-unknown"
+#endif
+
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
@@ -96,7 +102,7 @@ const char *fastmem_strerror(unsigned long code)
 
 const char *fastmem_version(void)
 {
-    return "0.1.0";
+    return FASTMEM_VERSION;
 }
 
 size_t fastmem_page_size(void)

@@ -10,6 +10,7 @@ and ARM64 without raising.
 """
 
 import ctypes
+import threading
 from ctypes import CFUNCTYPE, wintypes
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -240,9 +241,21 @@ def _define_mbi():
 MEMORY_BASIC_INFORMATION = _define_mbi()
 mbi_size = ctypes.sizeof(MEMORY_BASIC_INFORMATION)
 
-# Shared structure instance: region enumeration reuses it instead of
-# allocating one per VirtualQueryEx call.
-shared_mbi = MEMORY_BASIC_INFORMATION()
+# Reusable structure instance, one per thread: region enumeration reuses it
+# instead of allocating one per VirtualQueryEx call. Thread-local rather
+# than a module global, because two Process objects walked from two threads
+# would otherwise overwrite each other's MEMORY_BASIC_INFORMATION mid-walk
+# and yield regions belonging to neither process.
+_mbi_local = threading.local()
+
+
+def shared_mbi():
+    """The calling thread's reusable MEMORY_BASIC_INFORMATION."""
+    mbi = getattr(_mbi_local, "mbi", None)
+    if mbi is None:
+        mbi = MEMORY_BASIC_INFORMATION()
+        _mbi_local.mbi = mbi
+    return mbi
 
 VirtualQueryEx = _optional(
     "VirtualQueryEx",

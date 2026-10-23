@@ -24,8 +24,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "tools"))
 
 import msvc_paths  # noqa: E402
+import project_version  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+VERSION = project_version.read_version(HERE)
 
 # setuptools requires source paths to be relative and slash-separated: an
 # absolute path or os.sep fails packaging with
@@ -81,7 +83,12 @@ def _ext_modules():
             # kernel32 comes in implicitly through windows.h; an explicit
             # library list would only depend on the SDK layout.
             libraries=[],
-            define_macros=[("WIN32_LEAN_AND_MEAN", None)],
+            define_macros=[
+                ("WIN32_LEAN_AND_MEAN", None),
+                # Injected so the extension reports the same version as the
+                # package instead of a string that has to be bumped by hand.
+                ("FASTMEM_VERSION", '"{}"'.format(VERSION)),
+            ],
             optional=True,
         )
     ]

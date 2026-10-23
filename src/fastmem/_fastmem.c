@@ -23,6 +23,15 @@
 #include <stdlib.h>
 
 /*
+ * Version of the extension, injected by setup.py from pyproject.toml so the
+ * two cannot drift. The fallback is only for a manual compile outside the
+ * build system.
+ */
+#ifndef FASTMEM_VERSION
+#define FASTMEM_VERSION "0.0.0-unknown"
+#endif
+
+/*
  * A method using keyword arguments must have the (self, args, kwds)
  * signature, but PyMethodDef.METH_FUNC is a PyCFunction taking a single
  * argument. Without the cast below the pointer is truncated and Python
@@ -68,6 +77,21 @@ typedef struct {
 } batch_ctx;
 
 /*
+ * Release the parsed buffers.
+ *
+ * The mask is deliberately NOT released here: it is handed to the caller
+ * through Py_BuildValue, so a Py_XDECREF(mask) before that would be a
+ * use-after-free (observed as an access violation). Ownership of mask
+ * transfers to the returned tuple.
+ */
+static void
+release_batch(Py_buffer *abuf, Py_buffer *obuf)
+{
+    PyBuffer_Release(abuf);
+    PyBuffer_Release(obuf);
+}
+
+/*
  * Parse (handle, addrs, size, out) into ctx and allocate the result mask.
  *
  * Returns 0 with an exception set on failure. ``out`` must be a buffer of
@@ -90,6 +114,7 @@ parse_batch(PyObject *args, PyObject *kwds, batch_ctx *ctx, Py_buffer *abuf,
         return 0;
 
     if (ctx->size <= 0) {
+        release_batch(abuf, obuf);
         PyErr_SetString(PyExc_ValueError, "size must be positive");
         return 0;
     }
@@ -103,31 +128,19 @@ parse_batch(PyObject *args, PyObject *kwds, batch_ctx *ctx, Py_buffer *abuf,
     if (ctx->count > 0 && obuf->len < ctx->count * ctx->size) {
         /* Without this check C would write past the buffer, corrupting
          * the calling process. */
+        release_batch(abuf, obuf);
         PyErr_SetString(PyExc_BufferError,
                         "out buffer too small for count * size");
         return 0;
     }
 
     *mask = PyByteArray_FromStringAndSize(NULL, ctx->count);
-    if (!*mask)
+    if (!*mask) {
+        release_batch(abuf, obuf);
         return 0;
+    }
     ctx->mask = (unsigned char *)PyByteArray_AsString(*mask);
     return 1;
-}
-
-/*
- * Release the buffers only.
- *
- * The mask is deliberately NOT released here: it is handed to the caller
- * through Py_BuildValue, so a Py_XDECREF(mask) before that would be a
- * use-after-free (observed as an access violation). Ownership of mask
- * transfers to the returned tuple.
- */
-static void
-release_batch(Py_buffer *abuf, Py_buffer *obuf)
-{
-    PyBuffer_Release(abuf);
-    PyBuffer_Release(obuf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -927,16 +940,38 @@ batch_grouped(PyObject *self, PyObject *args, PyObject *kwds)
         return NULL;
     }
     if (span == 0 || span > (unsigned long long)PY_SSIZE_T_MAX) {
+        release_batch(&abuf, &obuf);
         PyErr_SetString(PyExc_ValueError, "span must be 1..PY_SSIZE_T_MAX");
         return NULL;
     }
 
+    /*
+     * A window narrower than one value cannot hold it. Without this clamp
+     * the copy below takes `size` bytes out of a `span`-byte scratch buffer:
+     * it reads past the allocation and returns neighbouring heap instead of
+     * process memory. csrc/fastmem.c has the same clamp; the extension is
+     * the copy that was missing it.
+     */
+    if (span < (unsigned long long)size)
+        span = (unsigned long long)size;
+
     count = abuf.len / (Py_ssize_t)sizeof(uintptr_t);
     if (count == 0) {
-        PyErr_SetString(PyExc_ValueError, "empty addrs");
-        return NULL;
+        PyObject *empty = PyByteArray_FromStringAndSize(NULL, 0);
+        PyObject *res;
+        release_batch(&abuf, &obuf);
+        if (!empty)
+            return NULL;
+        res = Py_BuildValue("nO", (Py_ssize_t)0, empty);
+        Py_DECREF(empty);
+        return res;
+    }
+    if (count > PY_SSIZE_T_MAX / size) {
+        release_batch(&abuf, &obuf);
+        return PyErr_NoMemory();
     }
     if (obuf.len < count * size) {
+        release_batch(&abuf, &obuf);
         PyErr_SetString(PyExc_BufferError, "out buffer too small");
         return NULL;
     }
@@ -1064,6 +1099,10 @@ batch_grouped_bytes(PyObject *self, PyObject *args, PyObject *kwds)
         PyErr_SetString(PyExc_ValueError, "span must be positive");
         return NULL;
     }
+
+    /* Window never narrower than one value: see batch_grouped. */
+    if (span < (unsigned long long)size)
+        span = (unsigned long long)size;
 
     addrs = (const uintptr_t *)abuf.buf;
     count = abuf.len / (Py_ssize_t)sizeof(uintptr_t);
@@ -1227,6 +1266,16 @@ one(PyObject *self, PyObject *args)
 
     if (!PyArg_ParseTuple(args, "KKny*", &handle, &addr, &size, &out))
         return NULL;
+
+    /* Not reachable from Process.read (which passes a 4 KiB scratch
+     * buffer), but backend.single is public and a short view would let
+     * ReadProcessMemory write past its end. */
+    if (size < 0 || out.len < size) {
+        PyBuffer_Release(&out);
+        PyErr_SetString(PyExc_BufferError,
+                        "out buffer smaller than size");
+        return NULL;
+    }
 
     r = do_one((HANDLE)(uintptr_t)handle, (uintptr_t)addr, size,
                (unsigned char *)out.buf);
@@ -1405,8 +1454,9 @@ PyInit__fastmem(void)
     PyObject *m = PyModule_Create(&moduledef);
     if (!m)
         return NULL;
-    /* Extension version: useful when debugging which build got loaded. */
-    if (PyModule_AddStringConstant(m, "__version__", "0.1.0") < 0) {
+    /* Extension version: injected from pyproject.toml by setup.py, so a
+     * version bump cannot leave the binary claiming an older release. */
+    if (PyModule_AddStringConstant(m, "__version__", FASTMEM_VERSION) < 0) {
         Py_DECREF(m);
         return NULL;
     }
